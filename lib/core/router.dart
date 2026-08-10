@@ -19,6 +19,7 @@ import '../features/host/screens/host_noshow_review_screen.dart';
 import '../features/host/screens/host_past_event_detail_screen.dart';
 import '../features/host/screens/host_past_events_screen.dart';
 import '../features/host/screens/host_rounds_screen.dart';
+import '../features/host/screens/host_seat_management_screen.dart';
 import '../features/host/screens/host_seat_scan_screen.dart';
 import '../features/host/screens/host_signup_screen.dart';
 import '../features/shared/role_picker_screen.dart';
@@ -44,6 +45,7 @@ final appRouter = GoRouter(
       builder: (context, state) => HostPastEventDetailScreen(eventId: state.pathParameters['eventId']!),
     ),
     GoRoute(path: '/host/floor', builder: (context, state) => const HostFloorDesignScreen()),
+    GoRoute(path: '/host/seats', builder: (context, state) => const HostSeatManagementScreen()),
     GoRoute(path: '/host/menu', builder: (context, state) => const HostMenuScreen()),
     GoRoute(path: '/host/rounds', builder: (context, state) => const HostRoundsScreen()),
     GoRoute(path: '/host/noshow', builder: (context, state) => const HostNoShowReviewScreen()),

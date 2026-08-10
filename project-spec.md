@@ -217,3 +217,14 @@ tables are added/removed during floor design.
   confirmation QR permanently rejected at check-in (no round to match against). Now sets it to
   whichever round is currently active for that event at acceptance time. See `0007_seat_ownership_tracking.sql`
   for both fixes.
+- **Manual seat block/assign (walk-ins, VIP holds, guests without the app) needed `guests` to allow
+  identities with no Supabase Auth account at all.** `guests.auth_user_id` and `phone_number` were both
+  `NOT NULL` — correct for the phone-OTP-verified guest flow, but a walk-in by definition has no app
+  account, and the host may not even have their phone number. Both columns are now nullable. Assigning
+  seats goes through a new `host_assign_seats()` RPC (mirrors `book_seats()`, but host-driven): if a
+  phone number is given and already belongs to an existing guest, it links to that guest instead of
+  creating a duplicate (so a VIP who happens to already have the app doesn't end up with two guest
+  records); otherwise it creates a fresh walk-in guest with no auth identity. A "seat them now" toggle
+  controls whether the seat goes straight to `occupied` (walk-in being seated on the spot) or `booked`
+  (a hold for someone arriving later, with no QR to scan them in — the host marks it occupied manually
+  from the same screen). See `0008_host_seat_assignment.sql`.

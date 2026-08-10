@@ -11,6 +11,7 @@ class HostDashboardScreen extends StatelessWidget {
     (Icons.qr_code, 'Event QR code', 'What guests scan to get in', '/host/events/qr'),
     (Icons.history, 'Past events', 'Reservations, menu, and floor design recap', '/host/events/past'),
     (Icons.table_restaurant, 'Design floor', 'Sections, tables, seats', '/host/floor'),
+    (Icons.event_seat, 'Manage seats', 'Block seats, assign walk-ins & VIP holds', '/host/seats'),
     (Icons.restaurant_menu, 'Menu', 'Add veg/non-veg menu items', '/host/menu'),
     (Icons.play_circle_outline, 'Rounds', 'Start a Pankti round / mark buffet seat cleaning', '/host/rounds'),
     (Icons.person_off_outlined, 'Review no-shows', 'Bookings past the timeout, waiting on you', '/host/noshow'),
