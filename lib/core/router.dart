@@ -13,11 +13,13 @@ import '../features/host/screens/host_dashboard_screen.dart';
 import '../features/host/screens/host_event_qr_screen.dart';
 import '../features/host/screens/host_feedback_form_screen.dart';
 import '../features/host/screens/host_floor_design_screen.dart';
+import '../features/host/screens/host_forgot_password_screen.dart';
 import '../features/host/screens/host_login_screen.dart';
 import '../features/host/screens/host_menu_screen.dart';
 import '../features/host/screens/host_noshow_review_screen.dart';
 import '../features/host/screens/host_past_event_detail_screen.dart';
 import '../features/host/screens/host_past_events_screen.dart';
+import '../features/host/screens/host_reset_password_screen.dart';
 import '../features/host/screens/host_rounds_screen.dart';
 import '../features/host/screens/host_seat_management_screen.dart';
 import '../features/host/screens/host_seat_scan_screen.dart';
@@ -36,6 +38,8 @@ final appRouter = GoRouter(
 
     GoRoute(path: '/host/login', builder: (context, state) => const HostLoginScreen()),
     GoRoute(path: '/host/signup', builder: (context, state) => const HostSignUpScreen()),
+    GoRoute(path: '/host/forgot-password', builder: (context, state) => const HostForgotPasswordScreen()),
+    GoRoute(path: '/host/reset-password', builder: (context, state) => const HostResetPasswordScreen()),
     GoRoute(path: '/host/dashboard', builder: (context, state) => const HostDashboardScreen()),
     GoRoute(path: '/host/events/create', builder: (context, state) => const HostCreateEventScreen()),
     GoRoute(path: '/host/events/qr', builder: (context, state) => const HostEventQrScreen()),

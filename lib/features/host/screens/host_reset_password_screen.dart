@@ -4,23 +4,25 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/supabase_client.dart';
 
-class HostLoginScreen extends StatefulWidget {
-  const HostLoginScreen({super.key});
+/// Reached via the recovery-link redirect (see main.dart's
+/// AuthChangeEvent.passwordRecovery listener) or directly if already in a
+/// recovery session. Same password rule as signup: at least 8 characters,
+/// letters and numbers.
+class HostResetPasswordScreen extends StatefulWidget {
+  const HostResetPasswordScreen({super.key});
 
   @override
-  State<HostLoginScreen> createState() => _HostLoginScreenState();
+  State<HostResetPasswordScreen> createState() => _HostResetPasswordScreenState();
 }
 
-class _HostLoginScreenState extends State<HostLoginScreen> {
+class _HostResetPasswordScreenState extends State<HostResetPasswordScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _submitting = false;
   String? _error;
 
   @override
   void dispose() {
-    _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -32,13 +34,7 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
       _error = null;
     });
     try {
-      await supabase.auth.signInWithPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
-      );
-      // first login after email confirmation is what actually creates the
-      // caterers row — see ensureCatererProfile() for why this can't
-      // happen at signUp() time.
+      await supabase.auth.updateUser(UserAttributes(password: _passwordController.text));
       await ensureCatererProfile();
       if (mounted) context.go('/host/dashboard');
     } on AuthException catch (e) {
@@ -53,7 +49,7 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Host log in')),
+      appBar: AppBar(title: const Text('Set a new password')),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 400),
@@ -66,19 +62,21 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   TextFormField(
-                    controller: _emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: const InputDecoration(labelText: 'Email'),
-                    validator: (v) =>
-                        (v == null || !v.contains('@')) ? 'Enter a valid email' : null,
-                  ),
-                  const SizedBox(height: 12),
-                  TextFormField(
                     controller: _passwordController,
                     obscureText: true,
-                    decoration: const InputDecoration(labelText: 'Password'),
-                    validator: (v) =>
-                        (v == null || v.length < 6) ? 'At least 6 characters' : null,
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      labelText: 'New password',
+                      helperText: 'At least 8 characters, with letters and numbers',
+                      helperMaxLines: 2,
+                    ),
+                    validator: (v) {
+                      if (v == null || v.length < 8) return 'At least 8 characters';
+                      final hasLetter = v.contains(RegExp(r'[A-Za-z]'));
+                      final hasDigit = v.contains(RegExp(r'[0-9]'));
+                      if (!hasLetter || !hasDigit) return 'Include both letters and numbers';
+                      return null;
+                    },
                   ),
                   const SizedBox(height: 20),
                   if (_error != null) ...[
@@ -91,16 +89,7 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
                         ? const SizedBox(
                             height: 18, width: 18,
                             child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Text('Log in'),
-                  ),
-                  const SizedBox(height: 8),
-                  TextButton(
-                    onPressed: () => context.go('/host/signup'),
-                    child: const Text("New caterer? Sign up"),
-                  ),
-                  TextButton(
-                    onPressed: () => context.go('/host/forgot-password'),
-                    child: const Text('Forgot password?'),
+                        : const Text('Update password'),
                   ),
                 ],
               ),
