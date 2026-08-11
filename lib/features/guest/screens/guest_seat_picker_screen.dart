@@ -3,16 +3,17 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/supabase_client.dart';
-import '../widgets/seat_picker_grid.dart';
-
-DemoSeatStatus _statusFromString(String s) =>
-    DemoSeatStatus.values.firstWhere((v) => v.name == s, orElse: () => DemoSeatStatus.blocked);
+import '../../shared/widgets/floor_layout.dart';
 
 /// Real seat picker: fetches this section's tables/seats, lets the guest
 /// select exactly partySize available seats, then books them atomically via
 /// the book_seats() RPC (see supabase/migrations/0005_guest_booking.sql —
 /// guests have no direct RLS write access to `seats`, so this has to be a
 /// security-definer function, not a client-side insert/update).
+///
+/// Seats are drawn in the host's actual arrangement via FloorLayoutView, the
+/// same renderer the host designs with, so the guest is picking off a picture
+/// of the room rather than a flat list of tables.
 class GuestSeatPickerScreen extends StatefulWidget {
   const GuestSeatPickerScreen({super.key, required this.eventId, required this.sectionId});
   final String eventId;
@@ -25,7 +26,7 @@ class GuestSeatPickerScreen extends StatefulWidget {
 class _GuestSeatPickerScreenState extends State<GuestSeatPickerScreen> {
   int _partySize = 2;
   final Set<String> _selected = {};
-  List<DemoTable>? _tables;
+  List<FloorTable>? _tables;
   String? _error;
   bool _booking = false;
 
@@ -40,20 +41,30 @@ class _GuestSeatPickerScreenState extends State<GuestSeatPickerScreen> {
     try {
       final rows = await supabase
           .from('tables')
-          .select('table_number, seats(id, seat_number, status)')
+          .select(
+              'id, table_number, grid_row, grid_col, orientation, seating_side, seats(id, seat_number, status)')
           .eq('section_id', widget.sectionId)
-          .order('table_number');
+          .order('grid_row')
+          .order('grid_col');
       setState(() {
         _tables = List<Map<String, dynamic>>.from(rows).map((t) {
           final seats = List<Map<String, dynamic>>.from(t['seats'] as List)
-              .map((s) => DemoSeat(
+              .map((s) => FloorSeat(
                     id: s['id'] as String,
                     seatNumber: s['seat_number'] as int,
-                    status: _statusFromString(s['status'] as String),
+                    status: seatStatusFromString(s['status'] as String),
                   ))
               .toList()
             ..sort((a, b) => a.seatNumber.compareTo(b.seatNumber));
-          return DemoTable(tableNumber: t['table_number'] as int, seats: seats);
+          return FloorTable(
+            id: t['id'] as String,
+            tableNumber: t['table_number'] as int,
+            gridRow: t['grid_row'] as int,
+            gridCol: t['grid_col'] as int,
+            orientation: orientationFromString(t['orientation'] as String?),
+            seatingSide: seatingSideFromString(t['seating_side'] as String?),
+            seats: seats,
+          );
         }).toList();
         _selected.removeWhere((id) => !_tables!.any((t) => t.seats.any((s) => s.id == id)));
       });
@@ -131,20 +142,31 @@ class _GuestSeatPickerScreenState extends State<GuestSeatPickerScreen> {
           ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(_error!)))
           : _tables == null
               ? const Center(child: CircularProgressIndicator())
-              : SeatPickerGrid(
+              : FloorLayoutView(
                   tables: _tables!,
                   selectedSeatIds: _selected,
                   partySize: _partySize,
-                  onToggle: _toggle,
+                  onToggleSeat: _toggle,
                 ),
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: FilledButton(
-            onPressed: _selected.length == _partySize && !_booking ? _book : null,
-            child: _booking
-                ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                : Text('Book ${_selected.length}/$_partySize seats'),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const FloorLegend(),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _selected.length == _partySize && !_booking ? _book : null,
+                  child: _booking
+                      ? const SizedBox(
+                          height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text('Book ${_selected.length}/$_partySize seats'),
+                ),
+              ),
+            ],
           ),
         ),
       ),

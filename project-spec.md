@@ -228,3 +228,27 @@ tables are added/removed during floor design.
   controls whether the seat goes straight to `occupied` (walk-in being seated on the spot) or `booked`
   (a hold for someone arriving later, with no QR to scan them in — the host marks it occupied manually
   from the same screen). See `0008_host_seat_assignment.sql`.
+- **Floor layout is host-configured as a whole section, not built table-by-table.** The host states a
+  table count, seats per table, row count, and orientation for a section; `configure_section_layout()`
+  calculates a grid (`grid_row`, `grid_col` per table) and generates every table and seat in one atomic
+  RPC call, replacing whatever was in the section before. Geometry is a coarse grid, not free x/y pixels
+  — hosts are describing a seating plan, not drawing to scale, and a grid is what both the host's editor
+  and the guest's seat picker can render identically from the same widget
+  (`lib/features/shared/widgets/floor_layout.dart`), so the arrangement the host lands on is exactly what
+  the guest sees while booking. Regenerating a section is refused if any of its seats are currently in
+  use or have ever been booked (`booking_seats` history exists) — silently dropping and recreating tables
+  would either yank a seat out from under someone seated right now, or erase the record of who sat where
+  for the past-events recap; the host has to delete the section and start over instead, which is a
+  visible, deliberate action. A separate `reflow_section_layout()` RPC recomputes grid positions alone
+  (for "same tables, fewer rows") and has no such guard, since it never touches a table, seat, or booking
+  — only where the table sits on screen. See `0009_floor_layout_geometry.sql`.
+- **Tables can seat one side only, not just both.** A table by default has guests on its near and far
+  side (a banana-leaf row read from the middle out); a table against a wall or stage needs every seat on
+  one side instead. `seating_side` (`both` / `near` / `far`) exists both as a section-wide default set
+  when building the layout and as a per-table override the host can flip afterward without touching
+  anyone else's table — the same two-tier pattern already used for orientation. Near/far rather than an
+  explicit side name because the meaning is already orientation-relative in the renderer (near is the top
+  for a horizontal table, left for a vertical one); the UI translates that into "Top only"/"Left only" etc.
+  based on the table's actual orientation so the host never has to think in near/far terms directly.
+  Seat count is unaffected either way — a one-sided table just gets all of its seats on that one side
+  instead of splitting them. See `0010_seating_side.sql`.
