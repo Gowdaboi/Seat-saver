@@ -50,6 +50,23 @@ String _seatingSideLabel(SeatingSide side, TableOrientation orientation) {
   }
 }
 
+/// There's no stored flag for "this section was built with Hall rows" —
+/// it's inferred from the shape configure_hall_rows() always leaves behind:
+/// a single column (grid_col 0 everywhere) of one-sided tables. A grid
+/// section normally won't match this (it's either multiple columns, or
+/// two-sided tables, or both), so the alternating aisle/touching spacing
+/// only kicks in where it actually means something.
+/// The gap after a hall-rows row, derived from that row's own seating_side
+/// rather than an assumed odd/even pattern — 'far' means this row's open
+/// edge (where its seats sit) borders the next row's seats too, so it's a
+/// facing pair and needs a wide aisle; 'near' means its open edge is the
+/// bar/back, so the next row sits right up against it.
+double _hallRowGap(FloorTable row) => row.seatingSide == SeatingSide.far ? 24 : 3;
+
+bool _looksLikeHallRows(_Section section) =>
+    section.tables.isNotEmpty &&
+    section.tables.every((t) => t.gridCol == 0 && t.seatingSide != SeatingSide.both);
+
 /// Real floor design editor. Sections hold tables; tables hold seats. Beyond
 /// adding them one at a time, the host can describe a whole section at once
 /// — "8 tables, 6 seats each, 2 rows, running horizontally" — and have the
@@ -228,6 +245,15 @@ class _FloorContentState extends State<_FloorContent> {
           'p_grid_rows': rows,
           'p_orientation': orientation.name,
           'p_seating_side': seatingSide.name,
+        });
+      });
+
+  Future<void> _configureHallRows(_Section section, int rowCount, int seatsPerRow) =>
+      _mutate('Could not build hall rows', () async {
+        await supabase.rpc('configure_hall_rows', params: {
+          'p_section_id': section.id,
+          'p_row_count': rowCount,
+          'p_seats_per_row': seatsPerRow,
         });
       });
 
@@ -422,6 +448,24 @@ class _FloorContentState extends State<_FloorContent> {
     );
   }
 
+  Future<void> _showConfigureHallRowsDialog(_Section section) async {
+    final config = await showDialog<_HallRowsConfig>(
+      context: context,
+      builder: (context) => _ConfigureHallRowsDialog(section: section),
+    );
+    if (config == null) return;
+    if (section.tables.isNotEmpty) {
+      final confirmed = await _confirmDelete(
+        'Rebuild ${section.name}?',
+        'This replaces the section\'s current ${section.tables.length} table(s) and '
+            '${section.capacity} seat(s) with the new layout. A section that has already '
+            'taken bookings can\'t be rebuilt this way — delete it instead.',
+      );
+      if (!confirmed) return;
+    }
+    await _configureHallRows(section, config.rowCount, config.seatsPerRow);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_error != null) {
@@ -495,6 +539,10 @@ class _FloorContentState extends State<_FloorContent> {
                   seatSize: 18,
                   scrollVertically: false,
                   padding: const EdgeInsets.all(12),
+                  showFacingLabels: true,
+                  rowGap: _looksLikeHallRows(section)
+                      ? (row) => _hallRowGap(section.tables.firstWhere((t) => t.gridRow == row))
+                      : null,
                 ),
               ),
               const SizedBox(height: 12),
@@ -568,6 +616,11 @@ class _FloorContentState extends State<_FloorContent> {
           icon: const Icon(Icons.grid_on, size: 18),
           label: Text(hasTables ? 'Rebuild layout' : 'Build layout'),
           onPressed: _mutating ? null : () => _showConfigureDialog(section),
+        ),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.view_agenda_outlined, size: 18),
+          label: const Text('Hall rows'),
+          onPressed: _mutating ? null : () => _showConfigureHallRowsDialog(section),
         ),
         if (hasTables) ...[
           Row(
@@ -858,4 +911,164 @@ class _ConfigureLayoutDialogState extends State<_ConfigureLayoutDialog> {
         ),
     ];
   }
+}
+
+class _HallRowsConfig {
+  const _HallRowsConfig({required this.rowCount, required this.seatsPerRow});
+  final int rowCount;
+  final int seatsPerRow;
+}
+
+/// Guests seated in individual rows rather than around two-sided tables: row
+/// 1 backs to the wall, pairs of rows face each other across a shared
+/// serving aisle, and consecutive pairs sit back-to-back with no gap between
+/// them. Row count and seats per row are the only inputs — the alternating
+/// near/far facing and the aisle-vs-touching gap both fall out of a row's
+/// position (even index vs. odd), matching configure_hall_rows() exactly.
+class _ConfigureHallRowsDialog extends StatefulWidget {
+  const _ConfigureHallRowsDialog({required this.section});
+  final _Section section;
+
+  @override
+  State<_ConfigureHallRowsDialog> createState() => _ConfigureHallRowsDialogState();
+}
+
+class _ConfigureHallRowsDialogState extends State<_ConfigureHallRowsDialog> {
+  late final TextEditingController _rows = TextEditingController(
+      text: '${widget.section.tables.isEmpty ? 4 : widget.section.tables.length}');
+  late final TextEditingController _seats =
+      TextEditingController(text: '${widget.section.uniformSeatsPerTable ?? 10}');
+
+  @override
+  void dispose() {
+    _rows.dispose();
+    _seats.dispose();
+    super.dispose();
+  }
+
+  int? get _rowCount => int.tryParse(_rows.text);
+  int? get _seatsPerRow => int.tryParse(_seats.text);
+
+  String? get _validationError {
+    final r = _rowCount;
+    final s = _seatsPerRow;
+    if (r == null || r <= 0) return 'Enter how many rows this section has.';
+    if (s == null || s <= 0) return 'Enter how many seats sit along each row.';
+    if (r > 200) return 'That\'s more than 200 rows — split it into sections instead.';
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final error = _validationError;
+    final r = _rowCount ?? 0;
+    final s = _seatsPerRow ?? 0;
+
+    return AlertDialog(
+      title: Text('Hall rows for ${widget.section.name}'),
+      content: SizedBox(
+        width: 380,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Row 1 backs to the wall. Pairs of rows share a serving aisle; '
+                'between one pair and the next, rows sit back-to-back.',
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _rows,
+                      keyboardType: TextInputType.number,
+                      autofocus: true,
+                      decoration: const InputDecoration(labelText: 'Number of rows'),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: _seats,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Seats per row'),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: error != null
+                    ? Text(error, style: TextStyle(color: theme.colorScheme.error))
+                    : Text(
+                        'Total capacity: $r × $s = ${r * s} seats',
+                        style: theme.textTheme.titleMedium,
+                      ),
+              ),
+              if (error == null && r > 0) ...[
+                const SizedBox(height: 12),
+                Text('Preview', style: theme.textTheme.labelMedium),
+                const SizedBox(height: 4),
+                Builder(builder: (context) {
+                  final preview = _previewRows(r, s);
+                  return ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 260),
+                    child: SingleChildScrollView(
+                      child: FloorLayoutView(
+                        tables: preview,
+                        seatSize: 12,
+                        scrollVertically: false,
+                        padding: EdgeInsets.zero,
+                        showFacingLabels: true,
+                        rowGap: (row) =>
+                            _hallRowGap(preview.firstWhere((t) => t.gridRow == row)),
+                      ),
+                    ),
+                  );
+                }),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+        FilledButton(
+          onPressed: error != null
+              ? null
+              : () => Navigator.pop(context, _HallRowsConfig(rowCount: r, seatsPerRow: s)),
+          child: const Text('Apply'),
+        ),
+      ],
+    );
+  }
+
+  /// Throwaway in-memory rows, positioned exactly the way
+  /// configure_hall_rows() will position the real ones.
+  List<FloorTable> _previewRows(int rowCount, int seatsPerRow) => [
+        for (var i = 0; i < rowCount; i++)
+          FloorTable(
+            id: 'preview-$i',
+            tableNumber: i + 1,
+            gridRow: i,
+            orientation: TableOrientation.horizontal,
+            seatingSide: i.isEven ? SeatingSide.far : SeatingSide.near,
+            seats: [
+              for (var n = 1; n <= seatsPerRow; n++)
+                FloorSeat(id: 'preview-$i-$n', seatNumber: n, status: FloorSeatStatus.available),
+            ],
+          ),
+      ];
 }

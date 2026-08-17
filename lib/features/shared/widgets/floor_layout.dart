@@ -75,6 +75,8 @@ class FloorLayoutView extends StatelessWidget {
     this.selectedSeatIds,
     this.partySize,
     this.onToggleSeat,
+    this.rowGap,
+    this.showFacingLabels = false,
   });
 
   final List<FloorTable> tables;
@@ -90,6 +92,17 @@ class FloorLayoutView extends StatelessWidget {
   final int? partySize;
   final void Function(String seatId)? onToggleSeat;
 
+  /// Space left after the row at [gridRow] before the next one. Defaults to
+  /// a flat 12px between every row; a hall-rows layout overrides this to
+  /// alternate between a wide aisle and near-zero (backs touching), matching
+  /// the physical rhythm of paired rows sharing one aisle.
+  final double Function(int gridRow)? rowGap;
+
+  /// Show which way a one-sided row's seats face (an arrow, derived from
+  /// [SeatingSide] + [TableOrientation]) — meaningless for a two-sided
+  /// table, so nothing is drawn when [FloorTable.seatingSide] is `both`.
+  final bool showFacingLabels;
+
   @override
   Widget build(BuildContext context) {
     if (tables.isEmpty) return const SizedBox.shrink();
@@ -104,7 +117,8 @@ class FloorLayoutView extends StatelessWidget {
         children: [
           for (final row in rowIndices) ...[
             _buildRow(context, row),
-            if (row != rowIndices.last) const SizedBox(height: 12),
+            if (row != rowIndices.last)
+              SizedBox(height: rowGap?.call(row) ?? 12),
           ],
         ],
       ),
@@ -129,6 +143,7 @@ class FloorLayoutView extends StatelessWidget {
               selectedSeatIds: selectedSeatIds,
               partySize: partySize,
               onToggleSeat: onToggleSeat,
+              showFacingLabel: showFacingLabels,
             ),
             if (table != tablesInRow.last) const SizedBox(width: 12),
           ],
@@ -145,6 +160,7 @@ class _TableWidget extends StatelessWidget {
     this.selectedSeatIds,
     this.partySize,
     this.onToggleSeat,
+    this.showFacingLabel = false,
   });
 
   final FloorTable table;
@@ -152,6 +168,27 @@ class _TableWidget extends StatelessWidget {
   final Set<String>? selectedSeatIds;
   final int? partySize;
   final void Function(String seatId)? onToggleSeat;
+  final bool showFacingLabel;
+
+  /// A one-sided row's seats face away from its own bar, toward whichever
+  /// side has no seats attached — the arrow points that way. `both` has
+  /// seats on every side, so there's no single direction to show. A seated
+  /// guest looks away from their own chair back — since the chair back sits
+  /// against the bar, the arrow points away from the bar, out past the row
+  /// of seats: 'near' seats sit above/left of the bar, so they look further
+  /// up/left; 'far' seats sit below/right, so they look further down/right.
+  String? get _facingArrow {
+    if (!showFacingLabel) return null;
+    final isHorizontal = table.orientation == TableOrientation.horizontal;
+    switch (table.seatingSide) {
+      case SeatingSide.both:
+        return null;
+      case SeatingSide.near:
+        return isHorizontal ? '▼' : '▶';
+      case SeatingSide.far:
+        return isHorizontal ? '▲' : '◀';
+    }
+  }
 
   // A table is drawn like it'd look from above: a bar in the middle with
   // seats on its two long sides. The first half of the seats (rounding up)
@@ -198,9 +235,14 @@ class _TableWidget extends StatelessWidget {
           : Column(mainAxisSize: MainAxisSize.min, children: _spaced(boxes, gap));
     }
 
+    // The bar has to stay legible even when seatSize is small (a compact
+    // preview can ask for seats as small as 12px) — below ~18px there's no
+    // room left for "T12 ▼" without clipping, so the bar's thickness has a
+    // floor independent of seatSize.
+    final barThickness = seatSize * 0.6 < 18 ? 18.0 : seatSize * 0.6;
     final tableBar = Container(
-      width: isHorizontal ? crossExtent : seatSize * 0.6,
-      height: isHorizontal ? seatSize * 0.6 : crossExtent,
+      width: isHorizontal ? crossExtent : barThickness,
+      height: isHorizontal ? barThickness : crossExtent,
       margin: EdgeInsets.symmetric(vertical: isHorizontal ? 4 : 0, horizontal: isHorizontal ? 0 : 4),
       alignment: Alignment.center,
       decoration: BoxDecoration(
@@ -208,7 +250,12 @@ class _TableWidget extends StatelessWidget {
         borderRadius: BorderRadius.circular(4),
         border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
-      child: Text('T${table.tableNumber}', style: theme.textTheme.labelSmall),
+      child: Text(
+        ['T${table.tableNumber}', ?_facingArrow].join(' '),
+        style: theme.textTheme.labelSmall,
+        overflow: TextOverflow.visible,
+        softWrap: false,
+      ),
     );
 
     final children = [seatRun(nearSeats), tableBar, seatRun(farSeats)];

@@ -130,6 +130,60 @@ void main() {
     }
   });
 
+  testWidgets('rowGap controls the space between rows', (tester) async {
+    final tables = [
+      for (var i = 0; i < 3; i++)
+        FloorTable(
+          id: 't$i',
+          tableNumber: i + 1,
+          gridRow: i,
+          seats: const [FloorSeat(id: 'x', seatNumber: 1, status: FloorSeatStatus.available)],
+        ),
+    ];
+    await tester.pumpWidget(_wrap(FloorLayoutView(
+      tables: tables,
+      rowGap: (row) => row.isEven ? 40 : 4,
+    )));
+
+    final y1 = tester.getTopLeft(find.text('T1')).dy;
+    final y2 = tester.getTopLeft(find.text('T2')).dy;
+    final y3 = tester.getTopLeft(find.text('T3')).dy;
+
+    // rowGap(0) = 40 (wide, an aisle) vs rowGap(1) = 4 (near-zero, backs
+    // touching) — the gap after row 0 must end up bigger than after row 1.
+    expect(y2 - y1, greaterThan(y3 - y2));
+  });
+
+  testWidgets('showFacingLabels draws an arrow for one-sided rows, nothing for both',
+      (tester) async {
+    final tables = [
+      FloorTable(
+        id: 't0',
+        tableNumber: 1,
+        seatingSide: SeatingSide.far,
+        seats: const [FloorSeat(id: 'a', seatNumber: 1, status: FloorSeatStatus.available)],
+      ),
+      FloorTable(
+        id: 't1',
+        tableNumber: 2,
+        gridRow: 1,
+        seatingSide: SeatingSide.near,
+        seats: const [FloorSeat(id: 'b', seatNumber: 1, status: FloorSeatStatus.available)],
+      ),
+      FloorTable(
+        id: 't2',
+        tableNumber: 3,
+        gridRow: 2,
+        seats: const [FloorSeat(id: 'c', seatNumber: 1, status: FloorSeatStatus.available)],
+      ),
+    ];
+    await tester.pumpWidget(_wrap(FloorLayoutView(tables: tables, showFacingLabels: true)));
+
+    expect(find.text('T1 ▲'), findsOneWidget);
+    expect(find.text('T2 ▼'), findsOneWidget);
+    expect(find.text('T3'), findsOneWidget);
+  });
+
   testWidgets('selection is capped at the party size', (tester) async {
     final selected = <String>{};
     final tables = _grid(tableCount: 1, seatsPerTable: 6, rows: 1);
