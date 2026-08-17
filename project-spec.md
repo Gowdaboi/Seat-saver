@@ -252,3 +252,19 @@ tables are added/removed during floor design.
   based on the table's actual orientation so the host never has to think in near/far terms directly.
   Seat count is unaffected either way — a one-sided table just gets all of its seats on that one side
   instead of splitting them. See `0010_seating_side.sql`.
+- **Releasing a seat must clear its ownership, not just its status — found by testing the manual
+  seat-assignment flow.** The host seat screen changed `seats.status` directly and left
+  `current_booking_id` pointing at the departed guest's booking. That column is exactly what
+  `check_in_booking()` tests to decide whether a scanned QR still legitimately holds the seat
+  (`0007`), and the test is "does the seat's current_booking_id still match *this* booking" — which
+  a stale value passes. Reproduced end-to-end on a Buffet event (no round check to catch it): guest
+  checks in, host clears the seat back to `available`, and the guest's **original** QR scans
+  successfully and retakes the seat. Freeing a seat now nulls `current_booking_id` in the same
+  update, and the same replay is correctly rejected. Same class of bug as the original Buffet
+  double-booking trigger: seat state, not booking history, is the source of truth, so every path
+  that frees a seat has to reset *all* of that state.
+- **`occupied` needed a way out of it.** The same screen offered no action on an occupied seat, so
+  the Buffet reuse cycle the `0007` trigger rewrite exists to permit (guest eats and leaves → host
+  clears the seat → someone else books it) was unreachable from the app: the capability was in the
+  database but had no UI. Tapping an occupied seat now moves it to `cleaning`, which already had a
+  path back to `available`.

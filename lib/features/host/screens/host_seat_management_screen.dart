@@ -99,10 +99,19 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  /// Returning a seat to 'available' has to release its ownership too, not
+  /// just its status. current_booking_id is what check_in_booking() tests to
+  /// decide whether a scanned QR still legitimately holds the seat (0007) —
+  /// leaving it set on a freed seat lets the previous guest re-scan their old
+  /// QR and flip it straight back to occupied, which on a Buffet event has no
+  /// round check to stop it. That is the exact replay 0007 exists to prevent.
   Future<void> _setStatus(_Seat seat, String status) async {
     setState(() => _mutating = true);
     try {
-      await supabase.from('seats').update({'status': status}).eq('id', seat.id);
+      await supabase.from('seats').update({
+        'status': status,
+        if (status == 'available') 'current_booking_id': null,
+      }).eq('id', seat.id);
       await reload();
     } catch (e) {
       _showError('Could not update seat: $e');
@@ -166,7 +175,17 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         ),
       ),
     );
-    if (result != true || nameController.text.trim().isEmpty) return;
+    final name = nameController.text.trim();
+    final phone = phoneController.text.trim();
+    nameController.dispose();
+    phoneController.dispose();
+    if (result != true) return;
+    if (name.isEmpty) {
+      // Previously this returned silently: the dialog closed, nothing was
+      // assigned, and the host got no indication why.
+      _showError('Enter a guest name to assign the seat(s).');
+      return;
+    }
 
     setState(() => _mutating = true);
     try {
@@ -174,8 +193,8 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         'p_event_id': widget.eventId,
         'p_seat_ids': _selected.toList(),
         'p_party_size': _selected.length,
-        'p_guest_name': nameController.text.trim(),
-        'p_guest_phone': phoneController.text.trim().isEmpty ? null : phoneController.text.trim(),
+        'p_guest_name': name,
+        'p_guest_phone': phone.isEmpty ? null : phone,
         'p_mark_occupied': markOccupied,
       });
       setState(() {
@@ -305,7 +324,13 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         tooltip = 'Tap to mark occupied';
         break;
       case 'occupied':
+        // Buffet seats get reused within one event — guest eats, leaves, the
+        // seat is cleared and rebooked. Without this step 'occupied' is a
+        // dead end and that reuse (which 0007 rewrote the double-booking
+        // trigger to allow) can't actually be reached from the app.
         color = Colors.red.shade200;
+        onTap = _mutating ? null : () => _setStatus(seat, 'cleaning');
+        tooltip = 'Tap to clear the seat (guest has left)';
         break;
       case 'cleaning':
         color = Colors.orange.shade200;
