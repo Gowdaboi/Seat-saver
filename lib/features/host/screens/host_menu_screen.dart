@@ -734,53 +734,82 @@ class _MenuContentState extends State<_MenuContent> {
   }
 
   Widget _filterBar() {
+    final search = TextField(
+      controller: _searchController,
+      decoration: InputDecoration(
+        isDense: true,
+        prefixIcon: const Icon(Icons.search, size: 20),
+        hintText: 'Search dishes',
+        border: const OutlineInputBorder(),
+        suffixIcon: _search.isEmpty
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.clear, size: 18),
+                onPressed: () {
+                  _searchController.clear();
+                  setState(() => _search = '');
+                },
+              ),
+      ),
+      onChanged: (v) => setState(() => _search = v),
+    );
+
+    final filters = SegmentedButton<String>(
+      showSelectedIcon: false,
+      segments: const [
+        ButtonSegment(value: 'all', label: Text('All')),
+        ButtonSegment(value: 'veg', label: Text('Veg')),
+        ButtonSegment(value: 'nonveg', label: Text('Non-veg')),
+      ],
+      selected: {_dietaryFilter},
+      onSelectionChanged: (v) => setState(() => _dietaryFilter = v.first),
+    );
+
+    final selectButton = TextButton(
+      onPressed: _mutating
+          ? null
+          : () => setState(() {
+                _selectMode = !_selectMode;
+                _selected.clear();
+              }),
+      child: Text(_selectMode ? 'Done' : 'Select'),
+    );
+
+    // The filter chips and Select button have a fixed width; on a narrow
+    // window keeping them on one row with the search field squeezed the
+    // field down to its own prefix icon. Below the breakpoint they get
+    // their own row instead.
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                isDense: true,
-                prefixIcon: const Icon(Icons.search, size: 20),
-                hintText: 'Search dishes',
-                border: const OutlineInputBorder(),
-                suffixIcon: _search.isEmpty
-                    ? null
-                    : IconButton(
-                        icon: const Icon(Icons.clear, size: 18),
-                        onPressed: () {
-                          _searchController.clear();
-                          setState(() => _search = '');
-                        },
-                      ),
-              ),
-              onChanged: (v) => setState(() => _search = v),
-            ),
-          ),
-          const SizedBox(width: 12),
-          SegmentedButton<String>(
-            showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(value: 'all', label: Text('All')),
-              ButtonSegment(value: 'veg', label: Text('Veg')),
-              ButtonSegment(value: 'nonveg', label: Text('Non-veg')),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 620) {
+            return Column(
+              children: [
+                search,
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: filters,
+                    )),
+                    selectButton,
+                  ],
+                ),
+              ],
+            );
+          }
+          return Row(
+            children: [
+              Expanded(child: search),
+              const SizedBox(width: 12),
+              filters,
+              const SizedBox(width: 8),
+              selectButton,
             ],
-            selected: {_dietaryFilter},
-            onSelectionChanged: (v) => setState(() => _dietaryFilter = v.first),
-          ),
-          const SizedBox(width: 8),
-          TextButton(
-            onPressed: _mutating
-                ? null
-                : () => setState(() {
-                      _selectMode = !_selectMode;
-                      _selected.clear();
-                    }),
-            child: Text(_selectMode ? 'Done' : 'Select'),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -1039,7 +1068,7 @@ class _MenuContentState extends State<_MenuContent> {
               cursor: SystemMouseCursors.grab,
               child: Tooltip(
                 message: 'Drag to reorder or move to another section',
-                child: Icon(Icons.drag_indicator, size: 20, color: scheme.outline),
+                child: Icon(Icons.drag_indicator, size: 20, color: scheme.onSurfaceVariant),
               ),
             ),
           ),
@@ -1050,38 +1079,105 @@ class _MenuContentState extends State<_MenuContent> {
           size: 20,
         ),
         const SizedBox(width: 12),
-        Expanded(child: Text(item.name)),
-        if (!_selectMode) ...[
-          IconButton(
-            icon: const Icon(Icons.edit_outlined, size: 20),
-            tooltip: 'Edit',
-            onPressed: _mutating ? null : () => showAddItemDialog(existing: item),
-          ),
-          IconButton(
-            icon: const Icon(Icons.delete_outline, size: 20),
-            tooltip: 'Delete',
-            onPressed: _mutating
-                ? null
-                : () async {
-                    if (await _confirm(
-                      'Delete ${item.name}?',
-                      'This removes it from the menu guests see.',
-                    )) {
-                      await _deleteItem(item);
-                    }
-                  },
-          ),
-        ],
+        Expanded(child: Text(item.name, overflow: TextOverflow.ellipsis)),
+        if (!_selectMode) _itemActions(item),
       ],
     );
 
     return InkWell(
       onTap: _selectMode ? toggleSelected : null,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 2, 8, 2),
+        padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
         child: rowContent,
       ),
     );
+  }
+
+  /// Two inline icon buttons plus a move control need roughly 150px, which a
+  /// phone-width window doesn't have once the handle, dietary icon and dish
+  /// name are placed — so below the breakpoint they collapse into a single
+  /// overflow menu rather than being squeezed.
+  Widget _itemActions(_MenuItem item) {
+    Future<void> delete() async {
+      if (await _confirm(
+        'Delete ${item.name}?',
+        'This removes it from the menu guests see.',
+      )) {
+        await _deleteItem(item);
+      }
+    }
+
+    if (MediaQuery.sizeOf(context).width < 620) {
+      return PopupMenuButton<String>(
+        enabled: !_mutating,
+        tooltip: 'Actions',
+        icon: const Icon(Icons.more_vert, size: 20),
+        onSelected: (choice) {
+          switch (choice) {
+            case 'edit':
+              showAddItemDialog(existing: item);
+            case 'move':
+              _showMoveDialog(item);
+            case 'delete':
+              delete();
+          }
+        },
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 'edit', child: Text('Edit')),
+          PopupMenuItem(value: 'move', child: Text('Move to section…')),
+          PopupMenuItem(value: 'delete', child: Text('Delete')),
+        ],
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.drive_file_move_outline, size: 20),
+          tooltip: 'Move to section',
+          visualDensity: VisualDensity.compact,
+          onPressed: _mutating ? null : () => _showMoveDialog(item),
+        ),
+        IconButton(
+          icon: const Icon(Icons.edit_outlined, size: 20),
+          tooltip: 'Edit',
+          visualDensity: VisualDensity.compact,
+          onPressed: _mutating ? null : () => showAddItemDialog(existing: item),
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline, size: 20),
+          tooltip: 'Delete',
+          visualDensity: VisualDensity.compact,
+          onPressed: _mutating ? null : delete,
+        ),
+      ],
+    );
+  }
+
+  /// The keyboard/touch-friendly alternative to dragging. Dragging is fine
+  /// with a mouse, but it is not discoverable and is awkward on a phone, so
+  /// moving between sections never depends on it.
+  Future<void> _showMoveDialog(_MenuItem item) async {
+    final targets = _displaySections.where((s) => s.id != item.sectionId).toList();
+    if (targets.isEmpty) {
+      _showError('There is no other section to move this to.');
+      return;
+    }
+    final choice = await showDialog<_MenuSection>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text('Move ${item.name} to'),
+        children: [
+          for (final s in targets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, s),
+              child: Text(s.name),
+            ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    await _moveItem(item, choice, _itemsIn(choice.isUncategorised ? null : choice.id).length);
   }
 }
 
