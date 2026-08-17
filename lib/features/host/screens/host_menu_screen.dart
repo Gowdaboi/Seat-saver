@@ -876,6 +876,12 @@ class _MenuContentState extends State<_MenuContent> {
 
     return ReorderableListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 88),
+      // Off, because the header already carries its own
+      // ReorderableDragStartListener. Left on (the default on desktop) it
+      // adds a second, automatic Icons.drag_handle at each card's trailing
+      // edge, vertically centred — which is the stray ≡ that collided with
+      // the row actions and the empty-section placeholder.
+      buildDefaultDragHandles: false,
       itemCount: sections.length,
       // onReorderItem (not onReorder) already accounts for the removal at
       // oldIndex, so newIndex needs no adjusting here.
