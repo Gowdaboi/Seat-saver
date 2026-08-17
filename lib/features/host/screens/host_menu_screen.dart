@@ -906,7 +906,11 @@ class _MenuContentState extends State<_MenuContent> {
                     ),
                   Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20),
                   const SizedBox(width: 8),
-                  Expanded(
+                  // Flexible, not Expanded: the title takes only the width it
+                  // needs so the count sits beside the name it belongs to.
+                  // Expanded stretched it across the card and stranded the
+                  // count against the far edge on a wide window.
+                  Flexible(
                     child: Text(
                       section.name,
                       style: Theme.of(context).textTheme.titleMedium,
@@ -914,10 +918,8 @@ class _MenuContentState extends State<_MenuContent> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // A long section name shrinks the Expanded above, never
-                  // this — the count is what gets clipped otherwise.
                   Container(
-                    constraints: const BoxConstraints(minWidth: 28),
+                    constraints: const BoxConstraints(minWidth: 24),
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
