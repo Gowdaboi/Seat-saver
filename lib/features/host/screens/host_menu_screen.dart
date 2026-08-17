@@ -12,6 +12,26 @@ const _defaultSectionNames = ['Starters', 'Mains', 'Desserts', 'Beverages'];
 /// has no row in menu_sections and can't be renamed, reordered, or deleted.
 const _uncategorisedId = '__uncategorised__';
 
+/// The resulting order after [moved] is dropped into slot [targetIndex] of
+/// [siblings]. [siblings] is the destination's current contents, which
+/// already include [moved] when the dish is being reordered inside its own
+/// section and don't when it's arriving from another one — the single
+/// awkward case being a drop *below* the dish's own position, where pulling
+/// it out first shifts the target slot up by one.
+///
+/// Pulled out of the widget so the index arithmetic is directly testable.
+List<String> dropOrder({
+  required List<String> siblings,
+  required String moved,
+  required int targetIndex,
+}) {
+  final without = [...siblings]..remove(moved);
+  final oldIndex = siblings.indexOf(moved);
+  var index = targetIndex;
+  if (oldIndex >= 0 && oldIndex < targetIndex) index -= 1;
+  return without..insert(index.clamp(0, without.length), moved);
+}
+
 class _MenuItem {
   _MenuItem({
     required this.id,
@@ -197,11 +217,24 @@ class _MenuContentState extends State<_MenuContent> {
 
   // ── sections ──────────────────────────────────────────────────────────
 
+  /// Adds only the defaults that aren't already present, so re-running it
+  /// after partly editing the list tops it up instead of duplicating.
   Future<void> seedDefaultSections() => _mutate('Could not create sections', () async {
+        final existing = (_sections ?? const <_MenuSection>[]).map((s) => s.name.toLowerCase()).toSet();
+        final missing = _defaultSectionNames.where((n) => !existing.contains(n.toLowerCase())).toList();
+        if (missing.isEmpty) return;
+        var order = _sections?.length ?? 0;
         await supabase.from('menu_sections').insert([
-          for (var i = 0; i < _defaultSectionNames.length; i++)
-            {'event_id': widget.eventId, 'name': _defaultSectionNames[i], 'display_order': i},
+          for (final name in missing)
+            {'event_id': widget.eventId, 'name': name, 'display_order': order++},
         ]);
+      });
+
+  /// Clears the section list so the host can start over — the escape hatch
+  /// for seeding the defaults by accident. Only offered while no dish is
+  /// filed under any of them, so it can never strand a real menu.
+  Future<void> _clearAllSections() => _mutate('Could not clear sections', () async {
+        await supabase.from('menu_sections').delete().eq('event_id', widget.eventId);
       });
 
   Future<void> _addSection(String name) => _mutate('Could not add section', () async {
@@ -232,16 +265,38 @@ class _MenuContentState extends State<_MenuContent> {
         }
       });
 
-  Future<void> _persistItemPlacement(List<_MenuItem> ordered, String? sectionId) =>
-      _mutate('Could not reorder items', () async {
-        for (var i = 0; i < ordered.length; i++) {
-          final item = ordered[i];
-          if (item.displayOrder == i && item.sectionId == sectionId) continue;
-          await supabase
-              .from('menu_items')
-              .update({'display_order': i, 'menu_section_id': sectionId}).eq('id', item.id);
-        }
-      });
+  /// One path for both "reorder within a section" and "move to another
+  /// section": the dish is dropped at [targetIndex] of [target], and every
+  /// row in that section is renumbered densely from 0 so the next append
+  /// can't collide with an existing display_order.
+  Future<void> _moveItem(_MenuItem item, _MenuSection target, int targetIndex) {
+    final targetSectionId = target.isUncategorised ? null : target.id;
+    final sameSection = item.sectionId == targetSectionId;
+
+    final siblings = _itemsIn(targetSectionId);
+    final orderedIds = dropOrder(
+      siblings: siblings.map((i) => i.id).toList(),
+      moved: item.id,
+      targetIndex: targetIndex,
+    );
+
+    // Dropped back where it already sat — nothing to write.
+    if (sameSection && orderedIds.join() == siblings.map((i) => i.id).join()) {
+      return Future.value();
+    }
+
+    final byId = {for (final i in [...siblings, item]) i.id: i};
+    return _mutate('Could not move item', () async {
+      for (var i = 0; i < orderedIds.length; i++) {
+        final row = byId[orderedIds[i]]!;
+        final needsSectionChange = row.id == item.id && !sameSection;
+        if (!needsSectionChange && row.displayOrder == i) continue;
+        await supabase
+            .from('menu_items')
+            .update({'display_order': i, 'menu_section_id': targetSectionId}).eq('id', row.id);
+      }
+    });
+  }
 
   // ── items ─────────────────────────────────────────────────────────────
 
@@ -497,13 +552,15 @@ class _MenuContentState extends State<_MenuContent> {
                                       tooltip: 'Delete',
                                       onPressed: () async {
                                         final count = _itemsIn(s.id).length;
-                                        final ok = await _confirm(
-                                          'Delete ${s.name}?',
-                                          count == 0
-                                              ? 'This section has no items.'
-                                              : 'Its $count item(s) stay on the menu and move to '
+                                        // Nothing is at stake for an empty
+                                        // section, so don't make the host
+                                        // confirm away a no-op.
+                                        final ok = count == 0 ||
+                                            await _confirm(
+                                              'Delete ${s.name}?',
+                                              'Its $count item(s) stay on the menu and move to '
                                                   'Uncategorised — they are not deleted.',
-                                        );
+                                            );
                                         if (ok) {
                                           await _deleteSection(s);
                                           setDialogState(() {});
@@ -534,12 +591,23 @@ class _MenuContentState extends State<_MenuContent> {
                             }
                           },
                         ),
-                        if (sections.isEmpty)
-                          OutlinedButton.icon(
-                            icon: const Icon(Icons.auto_awesome_outlined, size: 18),
-                            label: const Text('Use defaults'),
+                        // Always offered, not just when the list is empty:
+                        // topping the defaults back up after deleting one by
+                        // mistake was otherwise impossible.
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.auto_awesome_outlined, size: 18),
+                          label: Text(sections.isEmpty ? 'Use defaults' : 'Add missing defaults'),
+                          onPressed: () async {
+                            await seedDefaultSections();
+                            setDialogState(() {});
+                          },
+                        ),
+                        if (sections.isNotEmpty && (_items?.isEmpty ?? true))
+                          TextButton.icon(
+                            icon: const Icon(Icons.restart_alt, size: 18),
+                            label: const Text('Clear all'),
                             onPressed: () async {
-                              await seedDefaultSections();
+                              await _clearAllSections();
                               setDialogState(() {});
                             },
                           ),
@@ -804,7 +872,7 @@ class _MenuContentState extends State<_MenuContent> {
         padding: const EdgeInsets.only(top: 12, bottom: 4),
         child: Text(section.name, style: Theme.of(context).textTheme.titleMedium),
       ),
-      for (final item in items) _itemTile(item, draggableIndex: null),
+      for (final item in items) _itemRow(item),
     ];
   }
 
@@ -842,11 +910,26 @@ class _MenuContentState extends State<_MenuContent> {
                     child: Text(
                       section.name,
                       style: Theme.of(context).textTheme.titleMedium,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  Text(
-                    '${items.length}',
-                    style: Theme.of(context).textTheme.labelLarge,
+                  const SizedBox(width: 8),
+                  // A long section name shrinks the Expanded above, never
+                  // this — the count is what gets clipped otherwise.
+                  Container(
+                    constraints: const BoxConstraints(minWidth: 28),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${items.length}',
+                      style: Theme.of(context).textTheme.labelMedium,
+                      softWrap: false,
+                      overflow: TextOverflow.visible,
+                    ),
                   ),
                 ],
               ),
@@ -854,37 +937,24 @@ class _MenuContentState extends State<_MenuContent> {
           ),
           if (!collapsed) ...[
             const Divider(height: 1),
+            // Drag-and-drop here is Draggable/DragTarget rather than a nested
+            // ReorderableListView: a reorderable list can only move rows
+            // within itself, and dishes need to cross section boundaries.
+            // Every gap between rows is a drop slot, so the same gesture
+            // reorders within a section and moves between them.
             if (items.isEmpty)
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text(
-                  section.isUncategorised
-                      ? 'Nothing here.'
-                      : 'No dishes yet — drag one here, or use + Item.',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              )
+              _dropZone(section, 0, emptyPlaceholder: section.isUncategorised
+                  ? 'Nothing here.'
+                  : 'No dishes yet — drag one here, or use + Item.')
             else
-              // Nested reorderable: handles ordering *within* this section.
-              // Moving a dish to another section goes through the row's
-              // section menu rather than a cross-list drag, which
-              // ReorderableListView can't express on its own.
-              ReorderableListView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                buildDefaultDragHandles: false,
-                itemCount: items.length,
-                onReorderItem: (oldIndex, newIndex) {
-                  final reordered = [...items];
-                  final moved = reordered.removeAt(oldIndex);
-                  reordered.insert(newIndex, moved);
-                  _persistItemPlacement(reordered, section.isUncategorised ? null : section.id);
-                },
-                itemBuilder: (context, i) => _itemTile(
-                  items[i],
-                  draggableIndex: i,
-                  key: ValueKey('item-${items[i].id}'),
-                ),
+              Column(
+                children: [
+                  for (var i = 0; i < items.length; i++) ...[
+                    _dropZone(section, i),
+                    _itemRow(items[i]),
+                  ],
+                  _dropZone(section, items.length),
+                ],
               ),
           ],
         ],
@@ -892,86 +962,123 @@ class _MenuContentState extends State<_MenuContent> {
     );
   }
 
-  Widget _itemTile(_MenuItem item, {required int? draggableIndex, Key? key}) {
+  /// A gap between rows that accepts a dropped dish. Also doubles as the
+  /// empty-section placeholder, which is what makes "drag one here" true.
+  Widget _dropZone(_MenuSection section, int index, {String? emptyPlaceholder}) {
+    return DragTarget<_MenuItem>(
+      onWillAcceptWithDetails: (_) => !_mutating,
+      onAcceptWithDetails: (details) => _moveItem(details.data, section, index),
+      builder: (context, candidate, rejected) {
+        final active = candidate.isNotEmpty;
+        final scheme = Theme.of(context).colorScheme;
+        if (emptyPlaceholder != null) {
+          return Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            color: active ? scheme.primaryContainer : null,
+            child: Text(
+              active ? 'Drop here' : emptyPlaceholder,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          );
+        }
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          height: active ? 12 : 6,
+          margin: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: active ? scheme.primary : Colors.transparent,
+            borderRadius: BorderRadius.circular(3),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Laid out by hand rather than with ListTile: ListTile constrains its
+  /// leading slot, which clipped the drag handle and dietary icon together
+  /// (and the checkbox in select mode) instead of letting them size.
+  Widget _itemRow(_MenuItem item) {
     final isVeg = item.dietary == 'veg';
     final selected = _selected.contains(item.id);
-    final otherSections =
-        _displaySections.where((s) => s.id != item.sectionId && !s.isUncategorised).toList();
+    final scheme = Theme.of(context).colorScheme;
 
-    return ListTile(
-      key: key ?? ValueKey('item-${item.id}'),
-      dense: true,
-      leading: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_selectMode)
-            Checkbox(
-              value: selected,
-              onChanged: (_) => setState(() {
-                selected ? _selected.remove(item.id) : _selected.add(item.id);
-              }),
-            )
-          else if (draggableIndex != null)
-            ReorderableDragStartListener(
-              index: draggableIndex,
-              child: const Icon(Icons.drag_indicator, size: 20),
-            )
-          else
-            const SizedBox(width: 20),
-          const SizedBox(width: 8),
-          Icon(
-            isVeg ? Icons.eco_outlined : Icons.set_meal_outlined,
-            color: isVeg ? Colors.green : Colors.redAccent,
-            size: 20,
+    void toggleSelected() => setState(() {
+          selected ? _selected.remove(item.id) : _selected.add(item.id);
+        });
+
+    final rowContent = Row(
+      children: [
+        if (_selectMode)
+          Checkbox(value: selected, onChanged: (_) => toggleSelected())
+        else
+          // Drag starts from the handle only, so tapping the row still
+          // selects and the trailing buttons stay clickable.
+          Draggable<_MenuItem>(
+            data: item,
+            dragAnchorStrategy: pointerDragAnchorStrategy,
+            feedback: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(item.name),
+              ),
+            ),
+            childWhenDragging: Opacity(
+              opacity: 0.3,
+              child: Icon(Icons.drag_indicator, size: 20, color: scheme.outline),
+            ),
+            child: MouseRegion(
+              cursor: SystemMouseCursors.grab,
+              child: Tooltip(
+                message: 'Drag to reorder or move to another section',
+                child: Icon(Icons.drag_indicator, size: 20, color: scheme.outline),
+              ),
+            ),
+          ),
+        const SizedBox(width: 12),
+        Icon(
+          isVeg ? Icons.eco_outlined : Icons.set_meal_outlined,
+          color: isVeg ? Colors.green : Colors.redAccent,
+          size: 20,
+        ),
+        const SizedBox(width: 12),
+        Expanded(child: Text(item.name)),
+        if (!_selectMode) ...[
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, size: 20),
+            tooltip: 'Edit',
+            onPressed: _mutating ? null : () => showAddItemDialog(existing: item),
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline, size: 20),
+            tooltip: 'Delete',
+            onPressed: _mutating
+                ? null
+                : () async {
+                    if (await _confirm(
+                      'Delete ${item.name}?',
+                      'This removes it from the menu guests see.',
+                    )) {
+                      await _deleteItem(item);
+                    }
+                  },
           ),
         ],
+      ],
+    );
+
+    return InkWell(
+      onTap: _selectMode ? toggleSelected : null,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 2, 8, 2),
+        child: rowContent,
       ),
-      title: Text(item.name),
-      trailing: _selectMode
-          ? null
-          : Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (otherSections.isNotEmpty)
-                  PopupMenuButton<String>(
-                    tooltip: 'Move to section',
-                    icon: const Icon(Icons.drive_file_move_outline, size: 20),
-                    enabled: !_mutating,
-                    onSelected: (sectionId) => _mutate('Could not move item', () async {
-                      await supabase.from('menu_items').update({
-                        'menu_section_id': sectionId,
-                        'display_order': _itemsIn(sectionId).length,
-                      }).eq('id', item.id);
-                    }),
-                    itemBuilder: (context) => [
-                      for (final s in otherSections)
-                        PopupMenuItem(value: s.id, child: Text(s.name)),
-                    ],
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.edit_outlined, size: 20),
-                  onPressed: _mutating ? null : () => showAddItemDialog(existing: item),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline, size: 20),
-                  onPressed: _mutating
-                      ? null
-                      : () async {
-                          if (await _confirm(
-                            'Delete ${item.name}?',
-                            'This removes it from the menu guests see.',
-                          )) {
-                            await _deleteItem(item);
-                          }
-                        },
-                ),
-              ],
-            ),
-      onTap: _selectMode
-          ? () => setState(() {
-                selected ? _selected.remove(item.id) : _selected.add(item.id);
-              })
-          : null,
     );
   }
 }
