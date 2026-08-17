@@ -12,9 +12,12 @@ class _Section {
 }
 
 class _MenuItem {
-  _MenuItem({required this.name, required this.type});
+  _MenuItem({required this.name, required this.dietary});
   final String name;
-  final String type;
+  // 'veg' | 'nonveg'. Named dietary, not type, to keep it distinct from
+  // _Section.type above — that one is the floor zone's veg/nonveg/mixed
+  // designation, and both appear on this screen.
+  final String dietary;
 }
 
 /// Real menu + section list for the event, scoped by RLS to what the host
@@ -44,7 +47,7 @@ class _GuestFloorMenuScreenState extends State<GuestFloorMenuScreen> {
     try {
       final menuRows = await supabase
           .from('menu_items')
-          .select('name, type')
+          .select('name, dietary')
           .eq('event_id', widget.eventId)
           .order('name');
       final sectionRows = await supabase
@@ -54,7 +57,7 @@ class _GuestFloorMenuScreenState extends State<GuestFloorMenuScreen> {
           .order('display_order');
       setState(() {
         _menuItems = List<Map<String, dynamic>>.from(menuRows)
-            .map((r) => _MenuItem(name: r['name'] as String, type: r['type'] as String))
+            .map((r) => _MenuItem(name: r['name'] as String, dietary: r['dietary'] as String))
             .toList();
         _sections = List<Map<String, dynamic>>.from(sectionRows).map((r) {
           final capacity = (r['tables'] as List)
@@ -104,9 +107,9 @@ class _GuestFloorMenuScreenState extends State<GuestFloorMenuScreen> {
                           for (final item in _menuItems!)
                             Chip(
                               avatar: Icon(
-                                item.type == 'veg' ? Icons.eco_outlined : Icons.set_meal_outlined,
+                                item.dietary == 'veg' ? Icons.eco_outlined : Icons.set_meal_outlined,
                                 size: 18,
-                                color: item.type == 'veg' ? Colors.green : Colors.redAccent,
+                                color: item.dietary == 'veg' ? Colors.green : Colors.redAccent,
                               ),
                               label: Text(item.name),
                             ),

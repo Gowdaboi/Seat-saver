@@ -43,7 +43,7 @@ class _HostPastEventDetailScreenState extends State<HostPastEventDetailScreen> {
           .eq('event_id', widget.eventId);
       final menu = await supabase
           .from('menu_items')
-          .select('name, type')
+          .select('name, dietary')
           .eq('event_id', widget.eventId)
           .order('name');
       final sections = await supabase
@@ -106,9 +106,9 @@ class _HostPastEventDetailScreenState extends State<HostPastEventDetailScreen> {
                           for (final item in _menuItems!)
                             Chip(
                               avatar: Icon(
-                                item['type'] == 'veg' ? Icons.eco_outlined : Icons.set_meal_outlined,
+                                item['dietary'] == 'veg' ? Icons.eco_outlined : Icons.set_meal_outlined,
                                 size: 18,
-                                color: item['type'] == 'veg' ? Colors.green : Colors.redAccent,
+                                color: item['dietary'] == 'veg' ? Colors.green : Colors.redAccent,
                               ),
                               label: Text(item['name'] as String),
                             ),
