@@ -29,13 +29,43 @@ can't be skipped. Current RPCs:
 
 | Function | Purpose |
 |---|---|
-| `book_seats` | guest books seats atomically |
-| `host_assign_seats` | host seats a walk-in/VIP (guest may have no auth account) |
+| `book_seats(event, seats[], party, round?)` | guest books; round-scoped for Pankti |
+| `host_assign_seats(event, seats[], party, name, phone, round?)` | host books for a walk-in/VIP (guest may have no auth account) |
+| `ensure_bookable_round(event, party)` | earliest round with room; opens the next sitting when all are full |
+| `seats_for_round(section, round?)` | seat list with availability *for that round* |
+| `free_seat_count_for_round(event, round)` | capacity remaining in a round |
+| `start_round(event)` | complete current, start next, hand seat holds over |
 | `check_in_booking` | QR scan → seats occupied |
-| `configure_section_layout` | build a grid of two-sided tables |
-| `configure_hall_rows` | build rows of one-sided seats (aisle pattern) |
-| `reflow_section_layout` | move tables between grid rows, touching nothing else |
+| `configure_section_layout` / `configure_hall_rows` / `reflow_section_layout` | floor layout |
 | `mark_booking_no_show`, `accept_/reject_/expire_reassignment_offer`, `advance_reassignment_group`, `get_public_event_info` | rounds + reassignment engine |
+
+## Domain model — read before touching seats or bookings
+
+**Seat availability is per-round for Pankti** (`0014`). There is no
+`round_seats` table and none is needed: a seat is taken for round R iff an
+*active* (`requested`/`confirmed`) booking whose `round_id = R` holds it via
+`booking_seats`. Never decide bookability from `seats.status` for Pankti.
+
+**`seats.status` means only what is physically true right now** —
+`available | booked | occupied | cleaning`. It is not a reservation ledger.
+`booked` means "held for the sitting currently being served". A booking for a
+*future* round leaves the physical seat alone until `start_round()`
+materialises that round's holds. Buffet is the exception: it has no rounds, so
+there status *is* the reservation.
+
+**A booking picks its round when it is made.** An earlier design attached
+`round_id` late, in a sweep at round start; `0014` reversed that and deleted the
+sweep. Don't reintroduce it.
+
+**Freeing a seat must clear `current_booking_id`, not just the status.** That
+column is what `check_in_booking()` tests to decide whether a scanned QR still
+holds the seat, so a stale value lets a departed guest re-scan an old QR and
+retake a seat the host just freed. This bug has been introduced twice; both
+times on Buffet, where no round check catches it. Every path back to
+`available` goes through one patch that nulls it.
+
+**Vacating a seat keeps the booking.** The past-event recap counts bookings; a
+guest who left is not a booking that never happened.
 
 **Derived values are never stored.** Section capacity is summed from its tables'
 seats; a second editable field could only ever disagree with the tables it
@@ -116,6 +146,22 @@ available` — **expected**, managed Supabase has it. Everything after still app
   survive a reboot; restart it if localhost stops responding.
 - Chrome automation is blocked from `localhost`, so live UI verification means
   asking the user to click and screenshot.
+- **Removing an enum value means rebuilding the type**, and Postgres refuses
+  while a *view* depends on the column — `host_pending_noshow_bookings` reads
+  `seats.status`, so it has to be dropped and recreated around the swap.
+- **`ReorderableListView.buildDefaultDragHandles` defaults to `true`** on
+  desktop and injects its own handle at each row's trailing edge. Set it
+  `false` wherever you supply your own `ReorderableDragStartListener`, or a
+  stray `≡` appears mid-card and reads as a rendering glitch.
+- `ReorderableListView.onReorder` is deprecated for `onReorderItem`, which
+  *pre-adjusts* `newIndex` — drop the usual `if (newIndex > oldIndex) newIndex--`
+  when migrating or you introduce an off-by-one.
+- **`ListTile.leading` is width-constrained** and will clip two icons placed
+  side by side (worse in a select mode that adds a checkbox). Lay such rows out
+  directly.
+- Naming: `menu_sections` (courses) is deliberately distinct from `sections`
+  (floor seating zones), and `menu_items.dietary` is the veg/nonveg tag — it was
+  called `type` until `0012`, which read ambiguously once courses existed.
 
 ## Repo
 
