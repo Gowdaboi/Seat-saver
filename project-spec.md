@@ -263,6 +263,22 @@ tables are added/removed during floor design.
   update, and the same replay is correctly rejected. Same class of bug as the original Buffet
   double-booking trigger: seat state, not booking history, is the source of truth, so every path
   that frees a seat has to reset *all* of that state.
+- **The seat board is shown for Pankti as well as Buffet.** The rounds screen originally rendered
+  seats only for Buffet events; Pankti hosts saw a bare list of rounds. But Pankti is precisely when
+  seats turn over — a round ends, the whole hall is cleared and reset for the next sitting — so the
+  board is at least as useful there. Pankti keeps its round controls above the board rather than
+  instead of it.
+- **Guests carry an `is_vip` flag; dietary preference is deliberately not stored per guest.** VIP
+  holds were already a real workflow (`host_assign_seats` exists partly to place them) but "VIP" only
+  ever lived in the guest's name or the host's memory, so the seat board had nothing to show. A
+  dietary column was considered alongside it and rejected: a guest's dietary choice is expressed by
+  what they're served, and `menu_items.dietary` already records veg/nonveg per dish — storing it per
+  guest too would be a second source of truth with nothing keeping the two in agreement. See
+  `0013_guest_vip.sql`.
+- **Vacating a seat frees the seat but keeps the booking.** "The guest has left" is not "the booking
+  never happened": the booking is what the past-event recap counts, so it stays `confirmed` and only
+  the seat is released. Releasing goes through the same patch as any other return to `available`, so
+  it clears `current_booking_id` too and the departed guest's QR cannot retake the seat.
 - **`occupied` needed a way out of it.** The same screen offered no action on an occupied seat, so
   the Buffet reuse cycle the `0007` trigger rewrite exists to permit (guest eats and leaves → host
   clears the seat → someone else books it) was unreachable from the app: the capability was in the

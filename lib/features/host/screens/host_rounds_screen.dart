@@ -38,6 +38,27 @@ class _Seat {
   final String? currentBookingId;
 }
 
+/// Who is sitting in an occupied seat, reached through the seat's
+/// current_booking_id.
+class _Occupant {
+  _Occupant({
+    required this.bookingId,
+    required this.guestId,
+    required this.name,
+    required this.phone,
+    required this.partySize,
+    required this.bookingStatus,
+    required this.isVip,
+  });
+  final String bookingId;
+  final String guestId;
+  final String? name;
+  final String? phone;
+  final int partySize;
+  final String bookingStatus;
+  final bool isVip;
+}
+
 /// Real round/seat-turnover management, branching on the event's
 /// service_type per project-spec.md:
 /// - Pankti: manually start each round (no smart timing in v1).
@@ -236,6 +257,34 @@ class _RoundsContentState extends State<_RoundsContent> {
   Future<void> _setSeatStatus(_Seat seat, String status) =>
       _mutate('Could not update seat', () async {
         await supabase.from('seats').update(_statusPatch(status)).eq('id', seat.id);
+      });
+
+  /// Reads the occupant behind a seat. Returns null when the booking has
+  /// since gone, which is normal rather than an error — the board polls, so
+  /// a seat can be freed elsewhere between a refresh and the host's tap.
+  Future<_Occupant?> _loadOccupant(String bookingId) async {
+    final row = await supabase
+        .from('bookings')
+        .select('id, party_size, status, guests(id, name, phone_number, is_vip)')
+        .eq('id', bookingId)
+        .maybeSingle();
+    if (row == null) return null;
+    final guest = row['guests'] as Map<String, dynamic>?;
+    if (guest == null) return null;
+    return _Occupant(
+      bookingId: row['id'] as String,
+      guestId: guest['id'] as String,
+      name: guest['name'] as String?,
+      phone: guest['phone_number'] as String?,
+      partySize: row['party_size'] as int,
+      bookingStatus: row['status'] as String,
+      isVip: (guest['is_vip'] as bool?) ?? false,
+    );
+  }
+
+  Future<void> _setVip(_Occupant occupant, bool isVip) =>
+      _mutate('Could not update guest', () async {
+        await supabase.from('guests').update({'is_vip': isVip}).eq('id', occupant.guestId);
       });
 
   Future<void> _setTableStatus(
@@ -602,22 +651,33 @@ class _RoundsContentState extends State<_RoundsContent> {
   }
 
   Future<void> _showSeatActions(_Seat seat) async {
-    final status = await showModalBottomSheet<String>(
+    final result = await showModalBottomSheet<String>(
       context: context,
-      builder: (context) => SafeArea(
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 'Table ${seat.tableNumber} · Seat ${seat.seatNumber}',
-                style: Theme.of(context).textTheme.titleMedium,
+                style: Theme.of(sheetContext).textTheme.titleMedium,
               ),
               const SizedBox(height: 4),
               Text('Currently ${seat.status}',
-                  style: Theme.of(context).textTheme.bodySmall),
+                  style: Theme.of(sheetContext).textTheme.bodySmall),
+              if (seat.currentBookingId != null) ...[
+                const SizedBox(height: 16),
+                _OccupantPanel(
+                  load: () => _loadOccupant(seat.currentBookingId!),
+                  onToggleVip: (occupant, value) async {
+                    await _setVip(occupant, value);
+                  },
+                  onVacate: () => Navigator.pop(sheetContext, 'vacate'),
+                ),
+              ],
               const SizedBox(height: 16),
               SegmentedButton<String>(
                 showSelectedIcon: false,
@@ -639,15 +699,152 @@ class _RoundsContentState extends State<_RoundsContent> {
                   ),
                 ],
                 selected: {seat.status},
-                onSelectionChanged: (v) => Navigator.pop(context, v.first),
+                onSelectionChanged: (v) => Navigator.pop(sheetContext, v.first),
               ),
             ],
           ),
         ),
       ),
     );
-    if (status != null && status != seat.status) {
-      await _setSeatStatus(seat, status);
+    if (result == null) return;
+    // Vacating and "mark available" both free the seat, and both go through
+    // _statusPatch, which releases current_booking_id as well as the status.
+    if (result == 'vacate') {
+      await _setSeatStatus(seat, 'available');
+    } else if (result != seat.status) {
+      await _setSeatStatus(seat, result);
     }
+  }
+}
+
+/// Loads and shows whoever holds the seat. Kept stateful and separate so a
+/// VIP toggle can re-render on its own without rebuilding the whole board
+/// underneath the sheet.
+class _OccupantPanel extends StatefulWidget {
+  const _OccupantPanel({
+    required this.load,
+    required this.onToggleVip,
+    required this.onVacate,
+  });
+
+  final Future<_Occupant?> Function() load;
+  final Future<void> Function(_Occupant occupant, bool value) onToggleVip;
+  final VoidCallback onVacate;
+
+  @override
+  State<_OccupantPanel> createState() => _OccupantPanelState();
+}
+
+class _OccupantPanelState extends State<_OccupantPanel> {
+  late Future<_Occupant?> _future = widget.load();
+  bool _busy = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return FutureBuilder<_Occupant?>(
+      future: _future,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: SizedBox(
+              height: 20,
+              width: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          );
+        }
+        if (snapshot.hasError) {
+          return Text(
+            'Could not load guest: ${snapshot.error}',
+            style: TextStyle(color: theme.colorScheme.error),
+          );
+        }
+        final occupant = snapshot.data;
+        if (occupant == null) {
+          return Text(
+            'This seat is no longer held by a booking.',
+            style: theme.textTheme.bodySmall,
+          );
+        }
+
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      occupant.name?.trim().isNotEmpty == true
+                          ? occupant.name!
+                          : 'Guest (no name on file)',
+                      style: theme.textTheme.titleSmall,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (occupant.isVip) ...[
+                    const SizedBox(width: 8),
+                    const Chip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text('VIP'),
+                      avatar: Icon(Icons.star, size: 14),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                [
+                  'Party of ${occupant.partySize}',
+                  occupant.bookingStatus,
+                  // Walk-ins are assigned without a phone number, so this is
+                  // routinely absent rather than missing data.
+                  ?occupant.phone,
+                ].join(' · '),
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  TextButton.icon(
+                    icon: Icon(
+                      occupant.isVip ? Icons.star : Icons.star_border,
+                      size: 18,
+                    ),
+                    label: Text(occupant.isVip ? 'Remove VIP' : 'Mark VIP'),
+                    onPressed: _busy
+                        ? null
+                        : () async {
+                            setState(() => _busy = true);
+                            await widget.onToggleVip(occupant, !occupant.isVip);
+                            if (mounted) {
+                              setState(() {
+                                _busy = false;
+                                _future = widget.load();
+                              });
+                            }
+                          },
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    icon: const Icon(Icons.logout, size: 18),
+                    label: const Text('Vacate seat'),
+                    onPressed: _busy ? null : widget.onVacate,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }
