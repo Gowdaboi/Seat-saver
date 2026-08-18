@@ -263,6 +263,31 @@ tables are added/removed during floor design.
   update, and the same replay is correctly rejected. Same class of bug as the original Buffet
   double-booking trigger: seat state, not booking history, is the source of truth, so every path
   that frees a seat has to reset *all* of that state.
+- **Seat availability is per-round for Pankti — which reverses the round-start "sweep" decision
+  above.** A seat had one global status, so seat 5 could not be free for round 2 while taken for
+  round 1 — the very thing multi-round service is. Bookings therefore had no round until the host
+  *started* one, and the sweep existed to attach them late. Now a booking picks its round at the
+  moment it is made, and availability is derived from `booking_seats` joined to `bookings.round_id`:
+  "seat X is taken for round R if an active booking for round R holds it." No new table was needed —
+  those two already said it. The sweep is gone, replaced by `start_round()`, which releases the
+  finished sitting's seats and *materialises* the new round's reservations onto the physical seats,
+  so a held seat reads as `booked` on the live board exactly while that sitting is being served.
+  `seats.status` now means only what is physically true right now. Buffet keeps the status-based rule
+  it always had, since its seats are reused within one sitting rather than across several. See
+  `0014_round_scoped_booking.sql`.
+- **A full round opens the next one rather than refusing the booking.** `ensure_bookable_round()`
+  returns the earliest round with room and creates the next sitting when every planned one is full,
+  so "there is no space tonight" is never something a guest is told while the caterer would happily
+  serve another sitting. Concurrency is settled by `unique (event_id, round_number)`: if two guests
+  race to open the same round, the loser adopts the winner's round instead of failing.
+- **`blocked` was removed from `seat_status`.** Taking a seat out of service permanently — a broken
+  chair, a seat behind a pillar — is a fact about the floor plan, not a live service state the host
+  toggles mid-shift, so it belongs in Design floor (delete the seat) rather than on the ops screens.
+  Removing it also makes the four remaining statuses exhaustive, so the board's Total genuinely
+  equals Occupied + Booked + Available + Cleaning.
+- **Assigning a seat on a guest's behalf no longer has a "seat them now" toggle.** Assigning makes a
+  booking; whether the guest is physically sitting down is what check-in decides. Letting a host set
+  both independently let the two drift out of step for no benefit.
 - **The seat board is shown for Pankti as well as Buffet.** The rounds screen originally rendered
   seats only for Buffet events; Pankti hosts saw a bare list of rounds. But Pankti is precisely when
   seats turn over — a round ends, the whole hall is cleared and reset for the next sitting — so the

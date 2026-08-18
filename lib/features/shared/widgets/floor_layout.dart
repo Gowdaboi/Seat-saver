@@ -21,11 +21,15 @@ SeatingSide seatingSideFromString(String? s) => SeatingSide.values.firstWhere(
       orElse: () => SeatingSide.both,
     );
 
-enum FloorSeatStatus { available, booked, occupied, blocked, cleaning }
+/// Mirrors the seat_status enum. 'blocked' was removed in 0014: taking a
+/// seat out of service is a fact about the floor plan, not a live state.
+enum FloorSeatStatus { available, booked, occupied, cleaning }
 
+/// Falls back to `cleaning` — the conservative choice, since an
+/// unrecognised status must never render as bookable.
 FloorSeatStatus seatStatusFromString(String s) => FloorSeatStatus.values.firstWhere(
       (v) => v.name == s,
-      orElse: () => FloorSeatStatus.blocked,
+      orElse: () => FloorSeatStatus.cleaning,
     );
 
 class FloorSeat {
@@ -309,7 +313,6 @@ class _SeatBox extends StatelessWidget {
         case FloorSeatStatus.booked:
         case FloorSeatStatus.occupied:
           color = scheme.errorContainer;
-        case FloorSeatStatus.blocked:
         case FloorSeatStatus.cleaning:
           color = scheme.surfaceContainerHigh;
       }

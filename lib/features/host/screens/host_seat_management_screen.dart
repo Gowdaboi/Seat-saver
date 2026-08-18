@@ -133,7 +133,9 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
   Future<void> _showAssignDialog() async {
     final nameController = TextEditingController();
     final phoneController = TextEditingController();
-    var markOccupied = true;
+    // No "seat them now" toggle: assigning a seat makes a booking, and
+    // whether the guest is actually sitting down is what check-in decides.
+    // Letting the host set both independently let the two drift apart.
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -155,16 +157,6 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
                   labelText: 'Phone (optional)',
                   hintText: 'Leave blank if unknown',
                 ),
-              ),
-              const SizedBox(height: 12),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Seat them now'),
-                subtitle: Text(markOccupied
-                    ? 'Marks the seat(s) occupied immediately'
-                    : 'Just holds the seat(s); mark occupied later'),
-                value: markOccupied,
-                onChanged: (v) => setDialogState(() => markOccupied = v),
               ),
             ],
           ),
@@ -195,7 +187,8 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         'p_party_size': _selected.length,
         'p_guest_name': name,
         'p_guest_phone': phone.isEmpty ? null : phone,
-        'p_mark_occupied': markOccupied,
+        // p_round_id omitted: the RPC picks the earliest round with room,
+        // creating the next sitting when the planned ones are full.
       });
       setState(() {
         _selected.clear();
@@ -305,18 +298,11 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
     switch (seat.status) {
       case 'available':
         color = selected ? Theme.of(context).colorScheme.primary : null;
-        if (_selectMode) {
-          onTap = _mutating ? null : () => _toggleSelect(seat.id);
-          tooltip = 'Tap to select';
-        } else {
-          onTap = _mutating ? null : () => _setStatus(seat, 'blocked');
-          tooltip = 'Tap to block';
-        }
-        break;
-      case 'blocked':
-        color = Colors.grey.shade400;
-        onTap = _mutating ? null : () => _setStatus(seat, 'available');
-        tooltip = 'Tap to unblock';
+        // Only selectable now. Blocking was removed in 0014 — a seat that is
+        // permanently out of service is a floor-plan fact, so it is deleted
+        // in Design floor rather than toggled here mid-shift.
+        onTap = _selectMode && !_mutating ? () => _toggleSelect(seat.id) : null;
+        tooltip = _selectMode ? 'Tap to select' : 'Available';
         break;
       case 'booked':
         color = Colors.amber.shade200;

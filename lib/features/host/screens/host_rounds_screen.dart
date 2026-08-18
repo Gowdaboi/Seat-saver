@@ -213,36 +213,13 @@ class _RoundsContentState extends State<_RoundsContent> {
     }
   }
 
+  /// One RPC now, rather than complete-then-insert-then-sweep from here.
+  /// Bookings carry their round from the moment they are made (0014), so
+  /// there is nothing to sweep; starting a round instead releases the
+  /// previous sitting's seats and holds the ones this round's guests
+  /// reserved, which has to happen atomically.
   Future<void> _startNextRound() => _mutate('Could not start round', () async {
-        final current = _rounds!.where((r) => r.status == 'current');
-        for (final r in current) {
-          await supabase.from('rounds').update({'status': 'completed'}).eq('id', r.id);
-        }
-        final nextNumber = _rounds!.isEmpty
-            ? 1
-            : _rounds!.map((r) => r.roundNumber).reduce((a, b) => a > b ? a : b) + 1;
-        final newRound = await supabase
-            .from('rounds')
-            .insert({
-              'event_id': widget.eventId,
-              'round_number': nextNumber,
-              'status': 'current',
-              'started_at': DateTime.now().toUtc().toIso8601String(),
-            })
-            .select('id')
-            .single();
-
-        // Guests book ahead of the round actually starting, so their booking
-        // has no round yet. Starting round N is what says "everyone who's
-        // confirmed but unseated is being seated for this round now" — that's
-        // also what makes the no-show timeout apply to them (it's keyed off
-        // rounds.started_at). See project-spec.md "Resolved decisions".
-        await supabase
-            .from('bookings')
-            .update({'round_id': newRound['id']})
-            .eq('event_id', widget.eventId)
-            .eq('status', 'confirmed')
-            .isFilter('round_id', null);
+        await supabase.rpc('start_round', params: {'p_event_id': widget.eventId});
       });
 
   /// Returning a seat to 'available' releases its ownership as well as its
@@ -383,8 +360,11 @@ class _RoundsContentState extends State<_RoundsContent> {
                     scrollDirection: Axis.horizontal,
                     child: Row(
                       children: [
+                        // These four now account for every seat, so Total
+                        // always equals their sum.
                         _metric('Total', _allSeats.length, null),
                         _metric('Occupied', _countOf('occupied'), _statusColor('occupied')),
+                        _metric('Booked', _countOf('booked'), _statusColor('booked')),
                         _metric('Available', _countOf('available'), _statusColor('available')),
                         _metric('Cleaning', _countOf('cleaning'), _statusColor('cleaning')),
                       ],
@@ -501,6 +481,7 @@ class _RoundsContentState extends State<_RoundsContent> {
       'available': 'Available',
       'cleaning': 'Needs cleaning',
       'occupied': 'Occupied',
+      'booked': 'Booked',
     };
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -527,12 +508,14 @@ class _RoundsContentState extends State<_RoundsContent> {
     switch (status) {
       case 'available':
         return const Color(0xFF7CB342); // soft green
+      case 'booked':
+        return const Color(0xFF64B5F6); // soft blue — reserved, not arrived
       case 'occupied':
         return const Color(0xFFE57373); // soft red
       case 'cleaning':
         return const Color(0xFFFFB74D); // soft amber
       default:
-        return scheme.outlineVariant; // blocked
+        return scheme.outlineVariant;
     }
   }
 
@@ -569,17 +552,17 @@ class _RoundsContentState extends State<_RoundsContent> {
                   icon: const Icon(Icons.more_vert, size: 20),
                   onSelected: (choice) {
                     switch (choice) {
-                      // Everything except blocked seats goes back to
-                      // available — the "reset this table" action.
+                      // Reset the whole table, including seats still held
+                      // for this round's guests.
                       case 'all_available':
                         _setTableStatus(tableNumber, 'available',
-                            fromStatuses: {'available', 'occupied', 'cleaning'});
+                            fromStatuses: {'available', 'booked', 'occupied', 'cleaning'});
                       // The party just left: flag their seats for cleaning
                       // without touching seats nobody was sitting in.
                       case 'all_cleaning':
                         _setTableStatus(tableNumber, 'cleaning', fromStatuses: {'occupied'});
                       // Cleaning finished / guests gone: put the seats that
-                      // were in use back into service, leaving blocked ones.
+                      // were in use back into service.
                       case 'clear':
                         _setTableStatus(tableNumber, 'available',
                             fromStatuses: {'occupied', 'cleaning'});
@@ -615,7 +598,7 @@ class _RoundsContentState extends State<_RoundsContent> {
     return Opacity(
       opacity: dimmed ? 0.25 : 1,
       child: GestureDetector(
-        onHorizontalDragEnd: _mutating || seat.status == 'blocked'
+        onHorizontalDragEnd: _mutating
             ? null
             : (details) {
                 final velocity = details.primaryVelocity ?? 0;
