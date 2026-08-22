@@ -1,7 +1,49 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/errors.dart';
 import '../../../core/supabase_client.dart';
 import '../widgets/event_picker.dart';
+
+/// Reserved-but-not-physically-held. Deliberately not one of the four status
+/// colours — this is a different axis (a claim on a seat) rather than a fifth
+/// physical state.
+const _reservedColor = Color(0xFF5C6BC0); // indigo
+
+/// A seat spoken for by an active booking that the seat itself is not
+/// currently holding.
+///
+/// This is what the seat grid had no way to show. Under the per-round model
+/// (0014) a Pankti booking for a future sitting leaves `seats.status` alone —
+/// the seat really is empty right now — so a host who had just assigned one
+/// saw nothing change, and no amount of refreshing helped. The reservation
+/// lives in bookings + booking_seats and has to be read from there.
+class _Reservation {
+  _Reservation({
+    required this.bookingId,
+    required this.guestName,
+    required this.roundNumber,
+    required this.roundStatus,
+  });
+  final String bookingId;
+  final String? guestName;
+  final int? roundNumber;
+  final String? roundStatus;
+
+  /// Whether this reservation still needs a marker of its own.
+  ///
+  /// Keyed off the seat's actual hold rather than off the round's status: if
+  /// `current_booking_id` already points at this booking, the seat's colour
+  /// is telling the story and a badge would just be noise. Anything else —
+  /// a future sitting, or a booking into the running round whose seat could
+  /// not be claimed because it was still occupied — has nothing else showing
+  /// it, so it gets the badge.
+  ///
+  /// An earlier version asked "is the round upcoming?" instead, which hid
+  /// exactly the case QA hit: a seat booked into the round already running,
+  /// invisible on every screen.
+  bool needsMarker(String? seatCurrentBookingId) =>
+      roundStatus != 'completed' && seatCurrentBookingId != bookingId;
+}
 
 class _Seat {
   _Seat({
@@ -10,12 +52,18 @@ class _Seat {
     required this.status,
     required this.tableNumber,
     required this.sectionName,
+    this.currentBookingId,
+    this.reservation,
   });
   final String id;
   final int seatNumber;
   final String status;
   final int tableNumber;
   final String sectionName;
+  final String? currentBookingId;
+  final _Reservation? reservation;
+
+  bool get isReservedElsewhere => reservation?.needsMarker(currentBookingId) ?? false;
 }
 
 /// "Manually block/assign seats (walk-ins, VIP holds, guests without the
@@ -69,17 +117,57 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
     try {
       final rows = await supabase
           .from('seats')
-          .select('id, seat_number, status, tables!inner(table_number, event_id, sections(name))')
+          .select('id, seat_number, status, current_booking_id, '
+              'tables!inner(table_number, event_id, sections(name))')
           .eq('tables.event_id', widget.eventId);
+
+      // Read in two steps rather than one deeply nested embed: the join that
+      // matters here is booking_seats -> bookings -> (guests, rounds), and
+      // filtering an embedded resource three levels down is exactly where
+      // PostgREST queries get fragile.
+      final bookingRows = await supabase
+          .from('bookings')
+          .select('id, status, guests(name), rounds(round_number, status)')
+          .eq('event_id', widget.eventId)
+          .inFilter('status', ['requested', 'confirmed']);
+
+      final byBookingId = <String, _Reservation>{};
+      for (final b in List<Map<String, dynamic>>.from(bookingRows)) {
+        final round = b['rounds'] as Map?;
+        byBookingId[b['id'] as String] = _Reservation(
+          bookingId: b['id'] as String,
+          guestName: (b['guests'] as Map?)?['name'] as String?,
+          roundNumber: round?['round_number'] as int?,
+          // Buffet has no round at all; treat that as "not a future
+          // reservation", since there the seat status is the reservation.
+          roundStatus: round?['status'] as String?,
+        );
+      }
+
+      final bySeatId = <String, _Reservation>{};
+      if (byBookingId.isNotEmpty) {
+        final links = await supabase
+            .from('booking_seats')
+            .select('seat_id, booking_id')
+            .inFilter('booking_id', byBookingId.keys.toList());
+        for (final link in List<Map<String, dynamic>>.from(links)) {
+          final reservation = byBookingId[link['booking_id'] as String];
+          if (reservation != null) bySeatId[link['seat_id'] as String] = reservation;
+        }
+      }
+
       setState(() {
         _seats = List<Map<String, dynamic>>.from(rows).map((r) {
           final t = r['tables'] as Map;
+          final id = r['id'] as String;
           return _Seat(
-            id: r['id'] as String,
+            id: id,
             seatNumber: r['seat_number'] as int,
             status: r['status'] as String,
             tableNumber: t['table_number'] as int,
             sectionName: (t['sections'] as Map?)?['name'] as String? ?? '—',
+            currentBookingId: r['current_booking_id'] as String?,
+            reservation: bySeatId[id],
           );
         }).toList()
           ..sort((a, b) {
@@ -114,11 +202,14 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
       }).eq('id', seat.id);
       await reload();
     } catch (e) {
-      _showError('Could not update seat: $e');
+      _showError(friendlyError(e, fallback: 'Could not update the seat.'));
     } finally {
       if (mounted) setState(() => _mutating = false);
     }
   }
+
+  int get _reservedCount =>
+      (_seats ?? const <_Seat>[]).where((s) => s.isReservedElsewhere).length;
 
   void _toggleSelect(String seatId) {
     setState(() {
@@ -179,24 +270,46 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
       return;
     }
 
+    final seatCount = _selected.length;
     setState(() => _mutating = true);
     try {
-      await supabase.rpc('host_assign_seats', params: {
+      final bookingId = await supabase.rpc('host_assign_seats', params: {
         'p_event_id': widget.eventId,
         'p_seat_ids': _selected.toList(),
-        'p_party_size': _selected.length,
+        'p_party_size': seatCount,
         'p_guest_name': name,
         'p_guest_phone': phone.isEmpty ? null : phone,
         // p_round_id omitted: the RPC picks the earliest round with room,
         // creating the next sitting when the planned ones are full.
-      });
+      }) as String;
       setState(() {
         _selected.clear();
         _selectMode = false;
       });
       await reload();
+
+      // Which round it landed in is the host's main question — the RPC
+      // chooses it, so telling them afterwards is the only way they find out.
+      final round = await supabase
+          .from('bookings')
+          .select('rounds(round_number)')
+          .eq('id', bookingId)
+          .maybeSingle();
+      final roundNumber = (round?['rounds'] as Map?)?['round_number'] as int?;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            roundNumber == null
+                ? '$name booked into $seatCount seat(s).'
+                : '$name booked into $seatCount seat(s) for Round $roundNumber.',
+          ),
+        ),
+      );
     } catch (e) {
-      _showError('Could not assign seat(s): $e');
+      // Was dumping the whole PostgrestException — constraint name, key
+      // tuple and all — into the snackbar.
+      _showError(friendlyError(e, fallback: 'Could not assign the seat(s).'));
     } finally {
       if (mounted) setState(() => _mutating = false);
     }
@@ -252,6 +365,31 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
                 ],
               ),
             ),
+            if (_reservedCount > 0)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 14,
+                      height: 14,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(3),
+                        border: Border.all(color: _reservedColor, width: 2),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '$_reservedCount seat(s) are reserved but not yet held — booked '
+                        'for a round that has not started. They stay available until '
+                        'that round begins.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 80),
@@ -291,6 +429,8 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
 
   Widget _seatChip(_Seat seat) {
     final selected = _selected.contains(seat.id);
+    final reservation = seat.reservation;
+    final reservedAhead = seat.isReservedElsewhere;
     Color? color;
     VoidCallback? onTap;
     String tooltip = seat.status;
@@ -325,6 +465,17 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         break;
     }
 
+    // A seat held for a sitting that hasn't started is physically empty, so
+    // its status says 'available' and always will until start_round() runs.
+    // Without this marker the host assigns a seat and sees nothing change —
+    // which reads as "the booking failed" and invites double-booking.
+    if (reservedAhead && reservation != null) {
+      final who = reservation.guestName ?? 'a guest';
+      tooltip = 'Reserved for Round ${reservation.roundNumber ?? '?'} — $who'
+          '${_selectMode ? '\nStill selectable: a seat can be booked for a different round.' : ''}';
+    }
+
+    final scheme = Theme.of(context).colorScheme;
     return Tooltip(
       message: tooltip,
       child: InkWell(
@@ -335,11 +486,31 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
           height: 52,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: color ?? Theme.of(context).colorScheme.surfaceContainerHighest,
+            color: color ?? scheme.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(8),
-            border: selected ? Border.all(color: Theme.of(context).colorScheme.primary, width: 2) : null,
+            border: selected
+                ? Border.all(color: scheme.primary, width: 2)
+                : reservedAhead
+                    ? Border.all(color: _reservedColor, width: 2)
+                    : null,
           ),
-          child: Text('${seat.seatNumber}'),
+          child: reservedAhead
+              ? Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('${seat.seatNumber}'),
+                    Text(
+                      'R${reservation?.roundNumber ?? '?'}',
+                      style: TextStyle(
+                        fontSize: 10,
+                        height: 1.1,
+                        fontWeight: FontWeight.w600,
+                        color: _reservedColor,
+                      ),
+                    ),
+                  ],
+                )
+              : Text('${seat.seatNumber}'),
         ),
       ),
     );

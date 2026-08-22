@@ -309,3 +309,105 @@ tables are added/removed during floor design.
   clears the seat → someone else books it) was unreachable from the app: the capability was in the
   database but had no UI. Tapping an occupied seat now moves it to `cleaning`, which already had a
   path back to `available`.
+- **A round reminder needs a *planned* start time, so rounds gained one.** Rounds only ever had
+  `started_at`, stamped when the host presses Start — there was nothing to be "five minutes before".
+  `rounds.scheduled_start_at` is that plan, and it is nullable on purpose: a round nobody has
+  scheduled sends no reminders, which is honest, where inferring a time from the previous round's
+  length would quietly message people at the wrong moment. The window is also strictly *before* the
+  round — once the scheduled time has passed, "starts in 5 minutes" is false, so a missed window
+  stays missed rather than firing late. See `0015_round_reminders.sql`.
+- **Reminders are a queue table, not a fire-and-forget call.** `round_reminders` is unique per
+  `(booking_id, round_id)`, which is the entire guard against a retried cron run messaging a guest
+  twice, and it keeps its state (`pending → sending → sent | failed | skipped`) so a send that
+  Twilio refused is visible to the host afterwards instead of disappearing into a function log.
+  `sending` is a claim marker: it is what stops two overlapping runs handing the same row to Twilio.
+- **The database decides *who* is due; the edge function decides *what the message says*.**
+  Splitting it there is what keeps every Twilio credential out of the migration —
+  `enqueue_due_round_reminders()` runs on a plain SQL cron and talks to nothing external, so the
+  queue keeps filling correctly even when the sender is undeployed or down. The wording and the
+  cancel URL depend on deployment, not on the domain model, so they live with the sender.
+- **The cancel link authorises with a per-booking token, not a session.** A guest reading an SMS may
+  be on a phone that never signed in, and making them log in first means the seat stays held by
+  whoever gave up halfway. `bookings.cancel_token` is 24 random bytes as base64url; holding it proves
+  nothing about who you are, only that this booking's own message reached you, and the two anon RPCs
+  behind it can reach exactly that one booking. An unknown token returns "not valid" with no way to
+  tell a wrong guess from an expired link.
+- **Cancelling releases only the seats the booking *physically* holds** — the ones where
+  `seats.current_booking_id` is this booking. For a booking in a future sitting that is none of them:
+  those seats belong to whoever is being served right now, and per-round availability frees them the
+  moment the booking flips to `cancelled`. Freeing every row in `booking_seats` instead would have
+  thrown the current sitting out of their chairs, which is what the local test in
+  `test_round_reminders.sql` step 12 exists to catch.
+- **Cancelling is refused once the guest is seated, and is idempotent otherwise.** An `occupied`
+  seat, a completed round, or an existing no-show all return `too_late`; a second tap on the link
+  returns `already_cancelled`. Outcomes are returned as codes rather than raised as errors so the
+  public page can render a calm sentence for each case instead of parsing a Postgres message.
+- **`revoke ... from public` is not enough to lock down a Supabase RPC.** Supabase grants `anon`,
+  `authenticated` and `service_role` EXECUTE on new `public` functions by *default privilege*, which
+  is a grant to those roles directly — revoking PUBLIC's grant leaves it untouched. The older RPCs
+  survive that because they gate internally on `auth_guest_id()`/`auth_caterer_id()` and an anon
+  caller fails the check; the reminder-queue functions have no such inner guard, so the grant *is*
+  the guard and has to name the roles. Caught by local testing, where `anon` successfully drained
+  the queue — which would have leaked every due guest's phone number and cancel token.
+- **Event names are unique per caterer, compared case- and whitespace-insensitively.** Pickers show
+  the event name, so a host with two events called "Marriage" had no way to tell which was which —
+  and choosing wrong means designing a floor, starting a round or assigning a seat on the wrong
+  night. Scoped to the caterer rather than globally: two different caterers both running a
+  "Reception" is normal and none of each other's business. Existing duplicates are *renamed*
+  (`Marriage (2)`) rather than deleted, because an event owns floor layout, menu and bookings that
+  must not be destroyed to satisfy a constraint. The picker still shows date and venue alongside the
+  name, since a unique name is not the same as a recognisable one. See `0016_…`.
+- **The cancel token stopped using pgcrypto.** `gen_random_bytes()` needs the pgcrypto extension,
+  which Supabase installs into an `extensions` schema while every security-definer function here
+  pins `search_path = public`. The migration applied cleanly — the SQL editor's connection *does*
+  see `extensions` — and then failed at run time on every single booking, guest and host alike,
+  because the column default is evaluated inside those functions. Replaced with `gen_random_uuid()`,
+  which is core Postgres in `pg_catalog` and therefore resolves under any search_path at all. The
+  lesson generalises: prefer a builtin over an extension for anything a definer function touches.
+- **The host can plan a round without starting it.** Previously "Start round N" was the only way to
+  create a round, and it made that round `current` immediately — so an `upcoming` round existed only
+  when guest bookings happened to overflow into one. That made round scheduling, and therefore
+  reminders, unreachable for a host setting up in advance. "Plan a round" creates the next sitting
+  as `upcoming` and goes straight into the time picker, because a planned round with no time does
+  nothing.
+- **A signed-in host stays signed in across a page reload.** The session was always persisted;
+  nothing routed it anywhere, so every refresh landed on the role picker and read as a forced
+  logout. The router now redirects an existing *host* session away from `/` and `/host/login` only.
+  Host and guest are both real auth users, so they are told apart by the presence of an email —
+  hosts sign in with email/password, guests with phone OTP — which is the only discriminator
+  available to a redirect callback, since it has to answer synchronously. Every other route is left
+  alone, including the guest flow, password recovery, and the `/c/:token` cancel link that is
+  deliberately reachable signed out.
+- **Reservations are shown on their own visual axis, not as a fifth seat status.** Per-round
+  availability (0014) means a Pankti booking for an upcoming sitting holds no physical seat, so
+  after assigning seats a host saw the grid unchanged and every counter still reading zero — which
+  looks exactly like a failed save and invites double-booking a seat believed to be free. The
+  temptation is to mark the seat `booked` at assignment time; that is precisely the single-sitting
+  model 0014 removed, and it would make the seat unbookable for every other round. Instead the UI
+  now reads `bookings` + `booking_seats` and renders reservations *alongside* physical state: an
+  indigo outline and an `R2` badge on the seat grid, seat counts on the round chips, and a sentence
+  under the counters saying the numbers describe the hall right now. The seat stays selectable,
+  because the same seat legitimately belongs to different guests in different rounds.
+- **Raw `PostgrestException` text never reaches a user.** A repeat booking put the constraint name,
+  the key tuple and two uuids straight into a snackbar. `friendlyError()` translates the constraint
+  violations the app can actually provoke and passes through the messages our own RPCs raise, which
+  were written for people to read in the first place. Anything unrecognised falls back to a caller-
+  supplied sentence rather than to `toString()`.
+- **The host is told which round an assignment landed in.** `host_assign_seats` chooses the round
+  itself — earliest with room, opening a new sitting when the planned ones are full — so without
+  saying so afterwards the host has no way to learn where their guest ended up.
+- **A seat booked into the round already running is held immediately.** 0014 correctly stopped
+  Pankti bookings from touching `seats.status`, because a booking for a *future* sitting occupies
+  nothing — `start_round()` materialises that round's holds when it begins. But it materialises
+  once, at the moment it runs, and nothing materialised a booking made afterwards. That is not an
+  edge case: it is the ordinary path for host assignment, which exists to seat walk-ins during
+  service. Such a seat stayed `available` for the rest of the event, invisible on the grid,
+  uncounted by every metric, and offerable to a second guest. `book_seats` and `host_assign_seats`
+  now claim the seat when its round is `current`, guarded on `status = 'available'` so a seat still
+  occupied or mid-clean from the previous sitting is never overwritten. Future rounds are untouched,
+  so per-round availability is unchanged. See `0017_…`.
+- **Whether to badge a seat as reserved is decided by its hold, not by its round's status.** The
+  first version of the marker asked "is this round upcoming?", which hid precisely the case above —
+  a booking into the running round, which has no hold and no badge, so nothing on any screen showed
+  it. Comparing `seats.current_booking_id` against the booking is self-correcting: if the seat is
+  already holding this booking its colour tells the story, and if it is not, the badge does.

@@ -1,7 +1,9 @@
 import 'package:go_router/go_router.dart';
 
+import 'supabase_client.dart';
 import '../features/guest/screens/guest_booking_confirmation_screen.dart';
 import '../features/guest/screens/guest_call_host_screen.dart';
+import '../features/guest/screens/guest_cancel_booking_screen.dart';
 import '../features/guest/screens/guest_event_entry_screen.dart';
 import '../features/guest/screens/guest_floor_menu_screen.dart';
 import '../features/guest/screens/guest_phone_otp_screen.dart';
@@ -31,8 +33,36 @@ import '../features/shared/role_picker_screen.dart';
 /// Everything under /e carries the event id forward through the whole
 /// guest flow, since the guest screens have no other way to know which
 /// event they're booking into.
+/// Whether the stored session belongs to a *host* rather than a guest.
+///
+/// Both roles are real auth.users, so `currentSession != null` alone can't
+/// tell them apart, and bouncing a logged-in guest to the host dashboard
+/// would be worse than not redirecting at all. Hosts sign in with
+/// email/password and guests with phone OTP, so the presence of an email is
+/// the one discriminator available without an async round-trip — and a
+/// redirect callback has to answer synchronously.
+bool _hostSessionExists() {
+  final user = supabase.auth.currentUser;
+  if (user == null) return false;
+  return (user.email ?? '').isNotEmpty;
+}
+
 final appRouter = GoRouter(
   initialLocation: '/',
+  // Reloading the page used to drop a signed-in host back on the role picker,
+  // which read as "it logged me out". The session was never actually lost —
+  // supabase_flutter persists it to local storage — there was simply nothing
+  // routing an existing session anywhere. Hosts refresh mid-event, so this
+  // matters more than it sounds.
+  redirect: (context, state) {
+    final path = state.uri.path;
+    // Only the two entry points bounce. Everything else is left alone: the
+    // whole guest flow, the password-recovery screen (which runs on a real
+    // session and must not be redirected away from), and the /c/:token
+    // cancel link, which is deliberately reachable signed out.
+    if (path != '/' && path != '/host/login') return null;
+    return _hostSessionExists() ? '/host/dashboard' : null;
+  },
   routes: [
     GoRoute(path: '/', builder: (context, state) => const RolePickerScreen()),
 
@@ -89,6 +119,17 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/e/:eventId/call-host',
       builder: (context, state) => GuestCallHostScreen(eventId: state.pathParameters['eventId']!),
+    ),
+
+    // Not under /e/:eventId, and not behind a login, because this is the
+    // link inside a round-reminder SMS: the token already identifies one
+    // booking (and through it the event), and the guest reading the message
+    // may never have signed in on that phone. Kept short so it survives
+    // being pasted into a 160-character message.
+    GoRoute(
+      path: '/c/:token',
+      builder: (context, state) =>
+          GuestCancelBookingScreen(token: state.pathParameters['token']!),
     ),
   ],
 );

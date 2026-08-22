@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/supabase_client.dart';
 
@@ -64,6 +65,10 @@ class _HostCreateEventScreenState extends State<HostCreateEventScreen> {
       _submitting = true;
       _error = null;
     });
+    // Grabbed before the pop below, because after it this screen's context is
+    // gone but the app-level messenger is still there to show the snackbar.
+    final messenger = ScaffoldMessenger.of(context);
+    final name = _nameController.text.trim();
     try {
       final caterer = await supabase
           .from('caterers')
@@ -72,14 +77,27 @@ class _HostCreateEventScreenState extends State<HostCreateEventScreen> {
           .single();
       await supabase.from('events').insert({
         'caterer_id': caterer['id'],
-        'name': _nameController.text.trim(),
+        'name': name,
         'venue_name': _venueController.text.trim(),
         'date': _dateController.text,
         'service_type': _serviceType,
         'no_show_timeout_minutes': int.parse(_noShowController.text),
         'reassignment_response_minutes': int.parse(_reassignController.text),
       });
-      if (mounted) context.pop();
+      if (mounted) {
+        context.pop();
+        // Creating an event used to return to the dashboard in silence, which
+        // left the host unsure whether it had saved at all.
+        messenger.showSnackBar(SnackBar(content: Text('Created "$name"')));
+      }
+    } on PostgrestException catch (e) {
+      // 23505 here can only be events_caterer_name_uidx (0016): one caterer,
+      // one event name. Reported in the host's own words rather than as a
+      // constraint violation, since the fix is simply a different name.
+      setState(() => _error = e.code == '23505'
+          ? 'You already have an event called "$name". '
+              'Give this one a different name so you can tell them apart.'
+          : 'Could not create event: ${e.message}');
     } catch (e) {
       setState(() => _error = 'Could not create event: $e');
     } finally {

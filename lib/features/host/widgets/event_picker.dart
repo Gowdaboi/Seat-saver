@@ -2,6 +2,31 @@ import 'package:flutter/material.dart';
 
 import '../../../core/supabase_client.dart';
 
+const _months = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// "Sangeet · 1 Dec 2026 · Grand Palace".
+///
+/// Event names are unique per caterer as of 0016, so the name alone is no
+/// longer ambiguous — but the date is what a host actually recognises an
+/// event by when several are listed, and picking the wrong one means
+/// designing a floor or starting a round on somebody else's night.
+///
+/// Missing pieces are dropped rather than rendered as gaps, and an
+/// unparseable date falls back to its raw text instead of disappearing.
+String eventPickerLabel(Map<String, dynamic> event) {
+  final name = event['name'] as String?;
+  final venue = event['venue_name'] as String?;
+  final raw = event['date'] as String?;
+  final date = raw == null ? null : DateTime.tryParse(raw);
+  final when = date == null ? raw : '${date.day} ${_months[date.month - 1]} ${date.year}';
+  return [name, when, venue]
+      .where((part) => part != null && part.trim().isNotEmpty)
+      .join(' · ');
+}
+
 /// Shared "which event am I working on" header used by every event-scoped
 /// host screen (floor design, menu, ...). Fetches the caterer's events
 /// once, renders a dropdown, and hands the currently selected event id to
@@ -77,9 +102,15 @@ class _EventPickerState extends State<EventPicker> {
           child: DropdownButtonFormField<String>(
             initialValue: _selectedEventId,
             decoration: const InputDecoration(labelText: 'Event'),
+            // isExpanded so a long label ellipsises instead of overflowing —
+            // the label now carries date and venue, not just the name.
+            isExpanded: true,
             items: [
               for (final e in _events!)
-                DropdownMenuItem(value: e['id'] as String, child: Text(e['name'] as String)),
+                DropdownMenuItem(
+                  value: e['id'] as String,
+                  child: Text(eventPickerLabel(e), overflow: TextOverflow.ellipsis),
+                ),
             ],
             onChanged: (v) {
               setState(() => _selectedEventId = v);

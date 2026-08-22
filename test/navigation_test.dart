@@ -44,6 +44,21 @@ GoRouter _eventRouteTestRouter() => GoRouter(
       ],
     );
 
+/// The cancel link an SMS carries. Tokens are base64url, so they contain
+/// '-' and '_' — characters a path parameter has to hand back untouched or
+/// the lookup silently misses and the guest is told their link is invalid.
+GoRouter _cancelRouteTestRouter(String initial) => GoRouter(
+      initialLocation: initial,
+      routes: [
+        GoRoute(
+          path: '/c/:token',
+          builder: (context, state) => Scaffold(
+            body: Center(child: Text('token:${state.pathParameters['token']}')),
+          ),
+        ),
+      ],
+    );
+
 class _EventIdProbe extends StatelessWidget {
   const _EventIdProbe({required this.label, required this.eventId, this.extra});
   final String label;
@@ -97,5 +112,30 @@ void main() {
     expect(find.text('screen:seats'), findsOneWidget);
     expect(find.text('eventId:abc-123'), findsOneWidget);
     expect(find.text('extra:sec-1'), findsOneWidget);
+  });
+
+  testWidgets('cancel route: a base64url token survives path parsing intact',
+      (tester) async {
+    // Shape of a real cancel_token: 32 chars from [A-Za-z0-9_-].
+    const token = 'nPWJrT4YtN-q8zss4w243Kis_5D6ae7M';
+    await tester.pumpWidget(
+      MaterialApp.router(routerConfig: _cancelRouteTestRouter('/c/$token')),
+    );
+
+    expect(find.text('token:$token'), findsOneWidget);
+  });
+
+  testWidgets('cancel route: a percent-encoded token is decoded once',
+      (tester) async {
+    // The sender percent-encodes the token into the URL, so what arrives may
+    // be escaped; what reaches the RPC has to be the original string.
+    const token = 'abc-_123';
+    await tester.pumpWidget(
+      MaterialApp.router(
+        routerConfig: _cancelRouteTestRouter('/c/${Uri.encodeComponent(token)}'),
+      ),
+    );
+
+    expect(find.text('token:$token'), findsOneWidget);
   });
 }

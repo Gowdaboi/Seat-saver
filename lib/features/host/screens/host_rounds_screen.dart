@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/errors.dart';
 import '../../../core/supabase_client.dart';
 import '../widgets/event_picker.dart';
 
@@ -11,11 +12,22 @@ import '../widgets/event_picker.dart';
 const _autoRefreshEvery = Duration(seconds: 30);
 
 class _Round {
-  _Round({required this.id, required this.roundNumber, required this.status, this.startedAt});
+  _Round({
+    required this.id,
+    required this.roundNumber,
+    required this.status,
+    this.startedAt,
+    this.scheduledStartAt,
+  });
   final String id;
   final int roundNumber;
   final String status;
   final DateTime? startedAt;
+
+  /// When this round is *planned* to start, as opposed to startedAt, which
+  /// is stamped when the host actually presses Start. Reminders count back
+  /// from this, so a round without one simply never sends any (0015).
+  final DateTime? scheduledStartAt;
 }
 
 class _Seat {
@@ -93,7 +105,14 @@ class _RoundsContent extends StatefulWidget {
 
 class _RoundsContentState extends State<_RoundsContent> {
   String? _serviceType;
+  int _reminderLeadMinutes = 5;
   List<_Round>? _rounds;
+
+  /// Seats spoken for per round id. The five status metrics count physical
+  /// state, and a booking for a future sitting has none — so without this the
+  /// board reads 0 booked however many guests are expected, which is exactly
+  /// what a host assigning seats before service sees.
+  Map<String, int> _reservedByRound = const {};
   List<_Seat>? _seats;
   String? _error;
   bool _mutating = false;
@@ -142,10 +161,11 @@ class _RoundsContentState extends State<_RoundsContent> {
     try {
       final event = await supabase
           .from('events')
-          .select('service_type')
+          .select('service_type, reminder_lead_minutes')
           .eq('id', widget.eventId)
           .single();
       final serviceType = event['service_type'] as String;
+      final reminderLead = event['reminder_lead_minutes'] as int;
 
       final seatRows = await supabase
           .from('seats')
@@ -156,7 +176,7 @@ class _RoundsContentState extends State<_RoundsContent> {
       if (serviceType == 'pankti') {
         final roundRows = await supabase
             .from('rounds')
-            .select('id, round_number, status, started_at')
+            .select('id, round_number, status, started_at, scheduled_start_at')
             .eq('event_id', widget.eventId)
             .order('round_number');
         rounds = List<Map<String, dynamic>>.from(roundRows)
@@ -166,13 +186,45 @@ class _RoundsContentState extends State<_RoundsContent> {
                   status: r['status'] as String,
                   startedAt:
                       r['started_at'] == null ? null : DateTime.parse(r['started_at'] as String),
+                  scheduledStartAt: r['scheduled_start_at'] == null
+                      ? null
+                      : DateTime.parse(r['scheduled_start_at'] as String).toLocal(),
                 ))
             .toList();
+      }
+
+      final reservedByRound = <String, int>{};
+      if (serviceType == 'pankti') {
+        final bookingRows = await supabase
+            .from('bookings')
+            .select('id, round_id')
+            .eq('event_id', widget.eventId)
+            .inFilter('status', ['requested', 'confirmed']);
+        final roundIdByBooking = {
+          for (final b in List<Map<String, dynamic>>.from(bookingRows))
+            b['id'] as String: b['round_id'] as String?,
+        };
+        if (roundIdByBooking.isNotEmpty) {
+          // Counted in seats, not bookings: "Round 2 · 6 seats" is what tells
+          // a host whether the hall is full, where "3 bookings" does not.
+          final links = await supabase
+              .from('booking_seats')
+              .select('booking_id')
+              .inFilter('booking_id', roundIdByBooking.keys.toList());
+          for (final link in List<Map<String, dynamic>>.from(links)) {
+            final roundId = roundIdByBooking[link['booking_id'] as String];
+            if (roundId != null) {
+              reservedByRound[roundId] = (reservedByRound[roundId] ?? 0) + 1;
+            }
+          }
+        }
       }
 
       if (!mounted) return;
       setState(() {
         _serviceType = serviceType;
+        _reminderLeadMinutes = reminderLead;
+        _reservedByRound = reservedByRound;
         _rounds = rounds;
         _seats = List<Map<String, dynamic>>.from(seatRows).map((r) {
           final table = r['tables'] as Map;
@@ -207,7 +259,7 @@ class _RoundsContentState extends State<_RoundsContent> {
       await action();
       await reload();
     } catch (e) {
-      _showError('$failureMessage: $e');
+      _showError(friendlyError(e, fallback: failureMessage));
     } finally {
       if (mounted) setState(() => _mutating = false);
     }
@@ -419,9 +471,17 @@ class _RoundsContentState extends State<_RoundsContent> {
 
   Widget _roundControls() {
     final rounds = _rounds ?? const <_Round>[];
-    final nextNumber =
-        rounds.isEmpty ? 1 : rounds.map((r) => r.roundNumber).reduce((a, b) => a > b ? a : b) + 1;
+    final highest =
+        rounds.isEmpty ? 0 : rounds.map((r) => r.roundNumber).reduce((a, b) => a > b ? a : b);
+    final upcoming = rounds.where((r) => r.status == 'upcoming').toList()
+      ..sort((a, b) => a.roundNumber.compareTo(b.roundNumber));
     final current = rounds.where((r) => r.status == 'current').toList();
+
+    // start_round() promotes the earliest *upcoming* round when there is one,
+    // and only invents a new number when there isn't. The label has to say
+    // the same thing, or a host who planned round 2 is told they're about to
+    // start round 3.
+    final startsNumber = upcoming.isNotEmpty ? upcoming.first.roundNumber : highest + 1;
 
     return Card(
       child: Padding(
@@ -429,50 +489,186 @@ class _RoundsContentState extends State<_RoundsContent> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            Text(
+              current.isEmpty ? 'No round running' : 'Round ${current.first.roundNumber} running',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            // Wrap rather than Row: two buttons plus a title overflowed on a
+            // narrow window.
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
-                Expanded(
-                  child: Text(
-                    current.isEmpty
-                        ? 'No round running'
-                        : 'Round ${current.first.roundNumber} running',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
                 FilledButton.icon(
                   onPressed: _mutating ? null : _startNextRound,
                   icon: const Icon(Icons.play_arrow),
-                  label: Text('Start round $nextNumber'),
+                  label: Text('Start round $startsNumber'),
+                ),
+                // Without this there is no way to get an *upcoming* round at
+                // all: starting a round makes it current immediately, so a
+                // planned sitting only ever appeared when guest bookings
+                // overflowed into one — and a round with no plan can never
+                // send a reminder.
+                OutlinedButton.icon(
+                  onPressed: _mutating ? null : _addUpcomingRound,
+                  icon: const Icon(Icons.more_time),
+                  label: const Text('Plan a round'),
                 ),
               ],
             ),
             if (rounds.isNotEmpty) ...[
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
                 runSpacing: 4,
                 children: [
-                  for (final round in rounds.reversed)
-                    Chip(
-                      visualDensity: VisualDensity.compact,
-                      avatar: Icon(
-                        round.status == 'current'
-                            ? Icons.play_circle_fill
-                            : round.status == 'completed'
-                                ? Icons.check_circle_outline
-                                : Icons.schedule,
-                        size: 16,
-                        color: round.status == 'current' ? Colors.green : null,
-                      ),
-                      label: Text('Round ${round.roundNumber}'),
-                    ),
+                  for (final round in rounds.reversed) _roundChip(round),
                 ],
               ),
             ],
+            const SizedBox(height: 8),
+            // The counters above measure physical seats, and a reservation for
+            // a sitting that hasn't started holds none — so a host who has
+            // assigned twenty seats still reads Booked 0. Saying why, with the
+            // number, stops that looking like a failed save.
+            if (_reservedAhead > 0) ...[
+              Text(
+                '$_reservedAhead seat${_reservedAhead == 1 ? '' : 's'} reserved for rounds '
+                'that have not started. The counters above show the hall right now, so '
+                'those seats still read as available until you start their round.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+            ],
+            Text(
+              rounds.any((r) => r.status == 'upcoming' && r.scheduledStartAt != null)
+                  ? 'Guests with a phone number are messaged $_reminderLeadMinutes minutes '
+                      'before a scheduled round, with a link to cancel if they cannot make it.'
+                  : 'Plan a round to give it a start time — guests are only reminded '
+                      'about rounds that have one. Tap any upcoming round to change it.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
           ],
         ),
       ),
     );
+  }
+
+  /// Creates the next sitting *without* starting it, then asks for its start
+  /// time — the only route to a schedulable round that doesn't depend on
+  /// guests happening to fill the current one.
+  Future<void> _addUpcomingRound() async {
+    final existing = _rounds ?? const <_Round>[];
+    final nextNumber = existing.isEmpty
+        ? 1
+        : existing.map((r) => r.roundNumber).reduce((a, b) => a > b ? a : b) + 1;
+
+    await _mutate('Could not plan a round', () async {
+      await supabase.from('rounds').insert({
+        'event_id': widget.eventId,
+        'round_number': nextNumber,
+        'status': 'upcoming',
+      });
+    });
+
+    if (!mounted) return;
+    // _mutate reloaded, so the new round is in _rounds now. Go straight into
+    // the time picker: a planned round with no time does nothing useful.
+    final created = (_rounds ?? const <_Round>[]).where((r) => r.roundNumber == nextNumber);
+    if (created.isNotEmpty) await _scheduleRound(created.first);
+  }
+
+  /// Seats held for sittings that have not begun — the ones no status metric
+  /// can account for.
+  int get _reservedAhead {
+    var total = 0;
+    for (final round in _rounds ?? const <_Round>[]) {
+      if (round.status == 'upcoming') total += _reservedByRound[round.id] ?? 0;
+    }
+    return total;
+  }
+
+  /// Upcoming rounds are tappable so the host can plan a start time; started
+  /// and finished ones are not, because a reminder for them is either
+  /// already sent or already moot.
+  Widget _roundChip(_Round round) {
+    final schedulable = round.status == 'upcoming';
+    final label = StringBuffer('Round ${round.roundNumber}');
+    if (round.scheduledStartAt != null) {
+      label.write(' · ${_clock(round.scheduledStartAt!)}');
+    }
+    final reserved = _reservedByRound[round.id] ?? 0;
+    if (reserved > 0) label.write(' · $reserved seat${reserved == 1 ? '' : 's'}');
+
+    final chip = Chip(
+      visualDensity: VisualDensity.compact,
+      avatar: Icon(
+        round.status == 'current'
+            ? Icons.play_circle_fill
+            : round.status == 'completed'
+                ? Icons.check_circle_outline
+                : Icons.schedule,
+        size: 16,
+        color: round.status == 'current' ? Colors.green : null,
+      ),
+      label: Text(label.toString()),
+    );
+
+    if (!schedulable) return chip;
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: _mutating ? null : () => _scheduleRound(round),
+      child: chip,
+    );
+  }
+
+  String _clock(DateTime local) {
+    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute ${local.hour < 12 ? 'AM' : 'PM'}';
+  }
+
+  Future<void> _scheduleRound(_Round round) async {
+    final now = DateTime.now();
+    final existing = round.scheduledStartAt;
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: existing ?? now,
+      firstDate: now.subtract(const Duration(days: 1)),
+      lastDate: now.add(const Duration(days: 365)),
+      helpText: 'Round ${round.roundNumber} — start date',
+    );
+    if (date == null || !mounted) return;
+
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(existing ?? now.add(const Duration(minutes: 30))),
+      helpText: 'Round ${round.roundNumber} — start time',
+    );
+    if (time == null || !mounted) return;
+
+    final scheduled = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+
+    // A time already in the past can never produce a reminder — the window
+    // is strictly before the round — so say so rather than silently saving
+    // something that will never fire. The message names the current time
+    // because otherwise the host has no way to tell what to aim for, and the
+    // rejection arrives only after they have been through two pickers.
+    final now2 = DateTime.now();
+    if (!scheduled.isAfter(now2)) {
+      _showError('That time has already passed — it is ${_clock(now2)} now. '
+          'Pick a later time.');
+      return;
+    }
+
+    await _mutate('Could not schedule round', () async {
+      await supabase
+          .from('rounds')
+          .update({'scheduled_start_at': scheduled.toUtc().toIso8601String()})
+          .eq('id', round.id);
+    });
   }
 
   Widget _filterPills() {

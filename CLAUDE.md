@@ -36,6 +36,10 @@ can't be skipped. Current RPCs:
 | `free_seat_count_for_round(event, round)` | capacity remaining in a round |
 | `start_round(event)` | complete current, start next, hand seat holds over |
 | `check_in_booking` | QR scan → seats occupied |
+| `enqueue_due_round_reminders()` | SQL cron, every minute: queue reminders for rounds starting within the lead time |
+| `claim_due_round_reminders(limit)` | `service_role` only — hands pending reminders to the sender |
+| `mark_round_reminder_sent` / `_failed` | `service_role` only — send outcome back onto the row |
+| `get_booking_by_cancel_token` / `cancel_booking_by_token` | **anon-callable**; the SMS cancel link |
 | `configure_section_layout` / `configure_hall_rows` / `reflow_section_layout` | floor layout |
 | `mark_booking_no_show`, `accept_/reject_/expire_reassignment_offer`, `advance_reassignment_group`, `get_public_event_info` | rounds + reassignment engine |
 
@@ -53,6 +57,30 @@ can't be skipped. Current RPCs:
 materialises that round's holds. Buffet is the exception: it has no rounds, so
 there status *is* the reservation.
 
+**Any screen that shows seats must show reservations too, or the host sees
+nothing happen.** This is the direct consequence of the rule above and it has
+already caused one "the app is broken" report: assigning a seat for an
+upcoming Pankti round creates a confirmed booking but changes no seat status,
+so the grid and every status counter stay exactly as they were. Read
+reservations from `bookings` + `booking_seats` (active statuses, joined to
+`rounds`) and render them on a *separate axis* from the four physical states —
+indigo outline plus an `R2` badge on the seat grid, seat counts on the round
+chips. Do not fix this by writing to `seats.status` for a *future* round; that
+reintroduces the single-sitting model 0014 removed. Decide whether to draw the
+badge by comparing the seat's `current_booking_id` against the booking, never
+by asking whether the round is `upcoming` — the round-status version hid
+current-round bookings, which is exactly the case that needed showing.
+
+**`start_round()` materialises holds once, so booking into the *running*
+round must hold its seat itself** (`0017`). A Pankti booking for a future
+sitting deliberately holds nothing — but a booking made *after* its round
+started had nothing to materialise it, and that is the ordinary path for host
+assignment, which exists to seat walk-ins during service. The seat stayed
+`available` all event: invisible on the grid, uncounted by every metric, and
+offerable to someone else. `book_seats`/`host_assign_seats` now claim the seat
+when the target round is `current` (or the event is buffet), guarded on
+`status = 'available'` so an occupied or mid-clean seat is never overwritten.
+
 **A booking picks its round when it is made.** An earlier design attached
 `round_id` late, in a sweep at round start; `0014` reversed that and deleted the
 sweep. Don't reintroduce it.
@@ -66,6 +94,18 @@ times on Buffet, where no round check catches it. Every path back to
 
 **Vacating a seat keeps the booking.** The past-event recap counts bookings; a
 guest who left is not a booking that never happened.
+
+**Reminders count back from `rounds.scheduled_start_at`, never `started_at`.**
+`started_at` is stamped when the host presses Start, which is too late to
+warn anyone. `scheduled_start_at` is nullable and an unscheduled round simply
+sends nothing. The due window is strictly *before* the round, so a window the
+cron missed stays missed — a late "starts in 5 minutes" is worse than silence.
+
+**Cancelling a booking releases only seats where `current_booking_id` is that
+booking.** A booking for a future sitting holds no physical seat, so blanket-
+freeing every row in its `booking_seats` would evict the sitting currently
+being served. Per-round availability frees a future booking's seats on its own
+the moment the status flips to `cancelled`.
 
 **Derived values are never stored.** Section capacity is summed from its tables'
 seats; a second editable field could only ever disagree with the tables it
@@ -140,10 +180,42 @@ available` — **expected**, managed Supabase has it. Everything after still app
 - **Site URL must match the app's port** (8765), or confirmation links dead-end.
 - Already-registered emails are detected via `res.user!.identities` being empty
   (Supabase's documented anti-enumeration behavior).
+- **Supabase installs extensions into an `extensions` schema, not `public`.**
+  Every `security definer` function here pins `set search_path = public`, so
+  any call to an extension function (`gen_random_bytes`, `crypt`, …) resolves
+  locally — where `create extension` lands in `public` — and throws 42883 in
+  production. It passes migration-time checks too, because the SQL editor's
+  own connection *does* have `extensions` on its path; only run time fails.
+  This shipped once (0015's `new_cancel_token`) and broke every booking in the
+  app. Prefer a `pg_catalog` builtin (`gen_random_uuid()`), or pin the
+  function's own `search_path`. Reproduce locally with
+  `create schema extensions; create extension pgcrypto with schema extensions;`
+  and apply migrations under `PGOPTIONS='-c search_path=public,extensions'`.
 - **Never type or read secrets.** Passwords, service_role keys, Twilio tokens —
   the user handles those. Passwords cannot be retrieved, only reset.
-- The local web server (`python3 -m http.server 8765` in `build/web`) does not
-  survive a reboot; restart it if localhost stops responding.
+- **`revoke ... from public` does NOT lock down a Supabase RPC.** Supabase
+  grants `anon`, `authenticated` and `service_role` EXECUTE on new `public`
+  functions by default privilege — a grant to those roles directly, which
+  revoking PUBLIC leaves alone. Most RPCs here get away with it because they
+  gate internally on `auth_guest_id()`/`auth_caterer_id()`; any function
+  without such an inner check must
+  `revoke ... from public, anon, authenticated` explicitly. The local stub
+  replicates those default privileges, so this is testable locally.
+- **The Twilio account is on a trial**: it only delivers to numbers verified on
+  that account and prefixes every body with its own banner. Anything else comes
+  back as a Twilio error, which lands in `round_reminders.error`. WhatsApp
+  additionally needs an approved sender and pre-approved templates.
+- **The local web server needs restarting after every `flutter build web`.**
+  `python3 -m http.server 8765` served from `build/web` starts returning 404
+  for *every* path — including files that plainly exist — once a rebuild has
+  replaced that directory. Observed repeatedly; the mechanism was not pinned
+  down (in one instance the process's cwd inode still matched the live
+  directory, so "stale deleted inode" does not fully explain it). Don't spend
+  time diagnosing: kill and restart.
+- **Start it with the Bash tool's `run_in_background`, not `nohup … &`.** A
+  backgrounded shell job is reaped when the tool call's shell exits, so the
+  server appears to start, answers one `curl`, and is gone by the next turn —
+  while an older stale instance may still hold the port and answer 404s.
 - Chrome automation is blocked from `localhost`, so live UI verification means
   asking the user to click and screenshot.
 - **Removing an enum value means rebuilding the type**, and Postgres refuses
