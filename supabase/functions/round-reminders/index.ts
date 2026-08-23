@@ -37,6 +37,8 @@ interface DueReminder {
   lead_minutes: number;
   party_size: number;
   cancel_token: string;
+  /** Provider template id (Twilio Content SID). Null = send free text. */
+  content_sid: string | null;
 }
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -79,11 +81,40 @@ function composeBody(r: DueReminder, cancelUrl: string): string {
   return (
     `${greeting}Round ${r.round_number} at ${r.event_name} (${r.venue_name}) starts ` +
     `${startsIn(r.scheduled_start_at, r.lead_minutes)}. Please be at ${seats}. ` +
-    `Can't make it? Cancel here so someone else can take the seats: ${cancelUrl}`
+    `Can't make it? Cancel here so someone else can take them: ${cancelUrl}`
   );
 }
 
-async function sendViaTwilio(r: DueReminder, body: string): Promise<string> {
+/** Whole minutes until the round, floored at 1 — never "0 minutes". */
+function minutesAway(scheduledStartAt: string): number {
+  const m = Math.round((new Date(scheduledStartAt).getTime() - Date.now()) / 60_000);
+  return m < 1 ? 1 : m;
+}
+
+/**
+ * The positional variables a registered template is written against. Fixed
+ * and documented in 0020 so a template approved months ago keeps working:
+ *
+ *   {{1}} guest name   {{2}} round   {{3}} event
+ *   {{4}} minutes      {{5}} cancel URL
+ *
+ * A template using fewer of them is fine; the unused ones are ignored.
+ */
+function contentVariables(r: DueReminder, cancelUrl: string): string {
+  return JSON.stringify({
+    "1": r.guest_name ?? "there",
+    "2": String(r.round_number),
+    "3": r.event_name,
+    "4": String(minutesAway(r.scheduled_start_at)),
+    "5": cancelUrl,
+  });
+}
+
+async function sendViaTwilio(
+  r: DueReminder,
+  body: string,
+  cancelUrl: string,
+): Promise<string> {
   const accountSid = Deno.env.get("TWILIO_ACCOUNT_SID");
   const authToken = Deno.env.get("TWILIO_AUTH_TOKEN");
   if (!accountSid || !authToken) throw new Error("Twilio credentials are not configured");
@@ -94,13 +125,29 @@ async function sendViaTwilio(r: DueReminder, body: string): Promise<string> {
   if (!fromRaw) throw new Error(`no sender configured for channel ${r.channel}`);
 
   // WhatsApp is the same Messages endpoint with a scheme on both addresses.
+  // Strip any scheme already present in the configured value first: Twilio's
+  // console displays the sandbox sender as "whatsapp:+14155238886", so it is
+  // very easy to paste that verbatim into the secret and end up sending to
+  // "whatsapp:whatsapp:+…", which fails with an unhelpful 21211.
   const prefix = r.channel === "whatsapp" ? "whatsapp:" : "";
+  const from = fromRaw.replace(/^whatsapp:/i, "").trim();
+  const to = r.to_phone.replace(/^whatsapp:/i, "").trim();
 
   const form = new URLSearchParams({
-    To: `${prefix}${r.to_phone}`,
-    From: `${prefix}${fromRaw}`,
-    Body: body,
+    To: `${prefix}${to}`,
+    From: `${prefix}${from}`,
   });
+
+  // A reminder is business-initiated — the guest has not messaged us — so
+  // WhatsApp requires an approved template, and SMS to India requires a
+  // DLT-registered one. Free text is only accepted where neither rule
+  // applies, which is why the fallback is kept rather than removed.
+  if (r.content_sid) {
+    form.set("ContentSid", r.content_sid);
+    form.set("ContentVariables", contentVariables(r, cancelUrl));
+  } else {
+    form.set("Body", body);
+  }
 
   const res = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
@@ -121,17 +168,50 @@ async function sendViaTwilio(r: DueReminder, body: string): Promise<string> {
   return payload.sid as string;
 }
 
+/**
+ * The role the caller authenticated as, or null if there isn't one.
+ *
+ * Reading the claim rather than byte-comparing the key: the dashboard's cron
+ * UI may fill the header with a differently-issued service key than the
+ * SUPABASE_SERVICE_ROLE_KEY the platform injects here, and a strict equality
+ * check then fails forever with nothing to show why. Rotating the key had the
+ * same effect.
+ *
+ * Decoding a JWT without verifying its signature is only safe because Supabase
+ * verifies it before this function is ever invoked (`verify_jwt`, on by
+ * default). **Never deploy this function with `--no-verify-jwt`** — that would
+ * make the claim below forgeable by anyone.
+ */
+function callerRole(authHeader: string): string | null {
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  if (!token) return null;
+  if (SERVICE_KEY && token === SERVICE_KEY) return "service_role";
+
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const json = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    const role = JSON.parse(json)?.role;
+    return typeof role === "string" ? role : null;
+  } catch {
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   // This endpoint spends money and messages real people, so it is not enough
   // that the caller holds *a* valid project key — it has to be the service
   // role. Without this, anyone with the public anon key could drain the
   // queue on demand.
-  const auth = req.headers.get("Authorization") ?? "";
-  if (auth !== `Bearer ${SERVICE_KEY}`) {
-    return new Response(JSON.stringify({ error: "forbidden" }), {
-      status: 403,
-      headers: { "Content-Type": "application/json" },
-    });
+  const role = callerRole(req.headers.get("Authorization") ?? "");
+  if (role !== "service_role") {
+    // Naming the role that was seen turns a silent, permanent 403 into a
+    // one-line diagnosis. A role name is not a secret; the key is never
+    // echoed.
+    return new Response(
+      JSON.stringify({ error: "forbidden", saw_role: role ?? "none" }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    );
   }
 
   const template = Deno.env.get("CANCEL_URL_TEMPLATE");
@@ -162,11 +242,17 @@ Deno.serve(async (req) => {
     const cancelUrl = template.replace("{token}", encodeURIComponent(reminder.cancel_token));
     const body = composeBody(reminder, cancelUrl);
     try {
-      const sid = await sendViaTwilio(reminder, body);
+      const sid = await sendViaTwilio(reminder, body, cancelUrl);
       await rpc("mark_round_reminder_sent", {
         p_reminder_id: reminder.reminder_id,
         p_provider_sid: sid,
-        p_body: body,
+        // With a template the provider renders the final wording, so what is
+        // recorded is the template id and the variables that filled it —
+        // which is what you actually need to answer "what did this guest
+        // receive" afterwards.
+        p_body: reminder.content_sid
+          ? `[template ${reminder.content_sid}] ${contentVariables(reminder, cancelUrl)}`
+          : body,
       });
       sent++;
     } catch (e) {

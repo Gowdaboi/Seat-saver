@@ -411,3 +411,35 @@ tables are added/removed during floor design.
   a booking into the running round, which has no hold and no badge, so nothing on any screen showed
   it. Comparing `seats.current_booking_id` against the booking is self-correcting: if the seat is
   already holding this booking its colour tells the story, and if it is not, the badge does.
+- **Events are visible only to their caterer and to guests holding a booking.** `events_select_all
+  ... using (true)` let any signed-in account — and anyone can create one, a guest needs only a
+  phone OTP — list every caterer's event names, venues and dates: the customer list of every
+  business on the platform. Survivable on localhost, not once the app had a public URL. Nothing on
+  the guest side reads `events` directly, so scoping it breaks no flow: the QR landing page uses
+  `get_public_event_info()`, a definer RPC that returns one caller-named event and cannot browse,
+  and the floor/menu screens read `sections`, `menu_items` and `rounds`. The guest-side check goes
+  through a `security definer` helper because `bookings`' own policy already reads `events`, and two
+  RLS tables querying each other raise "infinite recursion detected in policy" — the same trap
+  `offer_belongs_to_caterer` was built for. See `0018_…`.
+- **A queued reminder whose moment has passed is retired, not sent.** 0015 guarded the *insert*
+  against past rounds and assumed a missed window therefore stayed missed. It only guarded the
+  insert: a row queued at T-5min sits `pending` until something claims it, so while the sender was
+  returning 403 a day-old reminder sat primed to fire the instant it was fixed. The same
+  "strictly before the round" rule now governs the queue, not just entry to it. See `0019_…`.
+- **Reminders are sent as provider-registered templates, not composed text.** Both channels refused
+  free text for the same underlying reason: a message sent five minutes before a round is
+  business-initiated — the guest has not messaged us — and neither carrier network permits that
+  without pre-approval. India's TRAI/DLT rules require a registered template and sender ID for
+  commercial SMS; Meta requires an approved template for business-initiated WhatsApp, and reopening
+  a fresh 24-hour session did not change it. `events.reminder_content_sid` carries the template id
+  and the sender supplies five positional variables ({{1}} guest, {{2}} round, {{3}} event,
+  {{4}} minutes, {{5}} cancel URL) — fixed and documented so a template approved months earlier
+  keeps working. Free text is kept as the fallback when no template is set, since it is still valid
+  outside those regimes and for local testing. See `0020_…`.
+- **A retired reminder no longer blocks its round forever.** The unique `(booking_id, round_id)`
+  guard is what stops a retried cron run double-messaging, but `on conflict do nothing` meant a
+  `skipped` or `failed` row kept the slot — so a host who rescheduled a round silently never
+  re-reminded anyone already queued for it. Those two states are now revived to `pending` instead.
+  Safe because the insert's own conditions must pass again first: an active booking, an upcoming
+  round, a start time still ahead. A row already `pending`, `sending` or `sent` is never touched,
+  so the double-send guard is intact.
