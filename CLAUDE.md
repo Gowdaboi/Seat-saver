@@ -22,6 +22,21 @@ Read that before changing behavior; add to it when you make a new call.
 row. Every policy scopes through them. Hosts authenticate with email/password;
 guests with phone OTP (Twilio).
 
+**No table is readable with `using (true)`.** Every event-scoped table is
+restricted to the owning caterer plus guests holding a booking (`0018`,
+`0022`). A guest earlier in the flow — scanned the QR, not yet booked — reads
+through *security-definer RPCs taking one event id* instead:
+`get_public_event_info`, `public_event_menu`, `public_event_sections`,
+`public_round_number`, `seats_for_round`. Naming the event you were given is
+the access rule, and it cannot be used to browse. If you add a guest screen,
+add an RPC — do not reopen a policy.
+
+**A policy on table A must not query table B if B's policy queries A.**
+Postgres raises "infinite recursion detected in policy" as soon as both sides
+are exercised in one query. Break it with a `security definer` helper on one
+side: `offer_belongs_to_caterer`, `guest_has_booking_for_event`,
+`guest_has_booking_for_seat`.
+
 **Anything atomic, or that must bypass RLS, is a `security definer` function**,
 never client-side writes. Each one starts with an explicit ownership check that
 raises `'not your section'` (or similar) — the definer rights are why that check

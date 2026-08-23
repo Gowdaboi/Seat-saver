@@ -443,3 +443,28 @@ tables are added/removed during floor design.
   Safe because the insert's own conditions must pass again first: an active booking, an upcoming
   round, a start time still ahead. A row already `pending`, `sending` or `sent` is never touched,
   so the double-send guard is intact.
+- **Reminder settings are editable by the host, from the Rounds screen.** Channel, lead time and
+  message template id existed only as columns; changing any of them needed database access, which
+  put the feature out of reach of the people it exists for. They now sit behind a Reminder settings
+  dialog on the screen where the host already reads "guests are messaged N minutes before". The
+  screen also warns, in red, when no template is set — because without one the provider refuses the
+  send outright and the only trace is an error on a queue row the host never sees.
+- **A host can place a walk-in in a specific sitting.** `host_assign_seats` always chose the
+  earliest round with room, which is the right default but made "seat this family in the second
+  sitting" inexpressible — during testing the only way to move a booking between rounds was SQL.
+  The assign dialog now offers "Next with room" (unchanged behaviour) or any open round.
+- **`host_assign_seats` now checks the round belongs to the event.** `book_seats` always did;
+  its host counterpart never had, because nothing passed a round id — the UI let the RPC choose.
+  Adding the round picker made the parameter reachable, and a deliberately foreign round id was
+  accepted, producing a booking on one event pointing at another event's round and skewing every
+  per-round count that joins the two. Existing damage is detached (round set null) rather than
+  deleted, since the booking and its seats are real and only the pointer was wrong. See `0021_…`.
+- **The remaining tenant-wide reads are closed.** `sections`, `tables`, `seats`, `menu_items`,
+  `menu_sections`, `rounds` and `feedback_forms` were all `using (true)`: a plain `GET /menu_items`
+  returned every caterer's menu, `GET /tables` every floor plan — no event id required, so
+  unguessable uuids were no protection. The obstacle was that a guest who has scanned a QR but not
+  yet booked has no row tying them to the event and must still see the floor and menu. Solved the
+  way `get_public_event_info` already solved it: `public_event_menu`, `public_event_sections` and
+  `public_round_number` are security-definer functions taking one event id, so naming the event you
+  were given is the access rule and cannot be used to browse. Section capacity is summed inside the
+  RPC, which also removes the guest's last reason to read `tables` at all. See `0022_…`.

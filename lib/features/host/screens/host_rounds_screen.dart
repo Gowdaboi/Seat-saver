@@ -106,6 +106,13 @@ class _RoundsContent extends StatefulWidget {
 class _RoundsContentState extends State<_RoundsContent> {
   String? _serviceType;
   int _reminderLeadMinutes = 5;
+  String _reminderChannel = 'sms';
+
+  /// Provider template id. Null means "send composed text", which carriers
+  /// reject for business-initiated WhatsApp and for SMS to India — so for a
+  /// caterer operating there this is the field that decides whether
+  /// reminders work at all, and it had no UI.
+  String? _reminderContentSid;
   List<_Round>? _rounds;
 
   /// Seats spoken for per round id. The five status metrics count physical
@@ -161,11 +168,13 @@ class _RoundsContentState extends State<_RoundsContent> {
     try {
       final event = await supabase
           .from('events')
-          .select('service_type, reminder_lead_minutes')
+          .select('service_type, reminder_lead_minutes, reminder_channel, reminder_content_sid')
           .eq('id', widget.eventId)
           .single();
       final serviceType = event['service_type'] as String;
       final reminderLead = event['reminder_lead_minutes'] as int;
+      final reminderChannel = event['reminder_channel'] as String;
+      final reminderContentSid = event['reminder_content_sid'] as String?;
 
       final seatRows = await supabase
           .from('seats')
@@ -224,6 +233,8 @@ class _RoundsContentState extends State<_RoundsContent> {
       setState(() {
         _serviceType = serviceType;
         _reminderLeadMinutes = reminderLead;
+        _reminderChannel = reminderChannel;
+        _reminderContentSid = reminderContentSid;
         _reservedByRound = reservedByRound;
         _rounds = rounds;
         _seats = List<Map<String, dynamic>>.from(seatRows).map((r) {
@@ -489,9 +500,22 @@ class _RoundsContentState extends State<_RoundsContent> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              current.isEmpty ? 'No round running' : 'Round ${current.first.roundNumber} running',
-              style: Theme.of(context).textTheme.titleMedium,
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    current.isEmpty
+                        ? 'No round running'
+                        : 'Round ${current.first.roundNumber} running',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.notifications_outlined),
+                  tooltip: 'Reminder settings',
+                  onPressed: _mutating ? null : _showReminderSettings,
+                ),
+              ],
             ),
             const SizedBox(height: 8),
             // Wrap rather than Row: two buttons plus a title overflowed on a
@@ -543,16 +567,132 @@ class _RoundsContentState extends State<_RoundsContent> {
             ],
             Text(
               rounds.any((r) => r.status == 'upcoming' && r.scheduledStartAt != null)
-                  ? 'Guests with a phone number are messaged $_reminderLeadMinutes minutes '
-                      'before a scheduled round, with a link to cancel if they cannot make it.'
+                  ? 'Guests with a phone number get a $_channelLabel '
+                      '$_reminderLeadMinutes minutes before a scheduled round, with a link '
+                      'to cancel if they cannot make it.'
                   : 'Plan a round to give it a start time — guests are only reminded '
                       'about rounds that have one. Tap any upcoming round to change it.',
               style: Theme.of(context).textTheme.bodySmall,
+            ),
+            // Without a template the provider refuses the send outright, and
+            // the only trace is an error on a queue row the host never sees.
+            // Say so here, where the setting is.
+            if (_reminderContentSid == null) ...[
+              const SizedBox(height: 6),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.warning_amber_rounded,
+                      size: 16, color: Theme.of(context).colorScheme.error),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'No message template set. WhatsApp, and SMS to Indian numbers, '
+                      'will refuse to send until one is added in Reminder settings.',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: Theme.of(context).colorScheme.error),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String get _channelLabel => _reminderChannel == 'whatsapp' ? 'WhatsApp message' : 'text message';
+
+  /// How reminders go out for this event. Every field here previously
+  /// required a database session to change, which put the feature out of
+  /// reach of the people it is for.
+  Future<void> _showReminderSettings() async {
+    var channel = _reminderChannel;
+    final leadController = TextEditingController(text: '$_reminderLeadMinutes');
+    final sidController = TextEditingController(text: _reminderContentSid ?? '');
+
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Reminder settings'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: channel,
+                  decoration: const InputDecoration(labelText: 'Send by'),
+                  items: const [
+                    DropdownMenuItem(value: 'sms', child: Text('SMS')),
+                    DropdownMenuItem(value: 'whatsapp', child: Text('WhatsApp')),
+                  ],
+                  onChanged: (v) => setDialogState(() => channel = v!),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: leadController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Send this many minutes before the round',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: sidController,
+                  decoration: const InputDecoration(
+                    labelText: 'Message template ID (optional)',
+                    hintText: 'HX…',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Leave the template blank to send plain text. Carriers refuse '
+                  'plain text for WhatsApp, and for SMS to Indian numbers — both '
+                  'need a template registered with the provider first.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save'),
             ),
           ],
         ),
       ),
     );
+
+    final lead = int.tryParse(leadController.text.trim());
+    final sid = sidController.text.trim();
+    leadController.dispose();
+    sidController.dispose();
+    if (saved != true) return;
+
+    if (lead == null || lead < 1) {
+      _showError('Enter how many minutes before the round to send, as a whole number.');
+      return;
+    }
+
+    await _mutate('Could not save reminder settings', () async {
+      await supabase.from('events').update({
+        'reminder_channel': channel,
+        'reminder_lead_minutes': lead,
+        // Empty means "no template", which is a real choice rather than a
+        // blank string the sender would try to use as an id.
+        'reminder_content_sid': sid.isEmpty ? null : sid,
+      }).eq('id', widget.eventId);
+    });
   }
 
   /// Creates the next sitting *without* starting it, then asks for its start

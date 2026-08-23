@@ -45,28 +45,31 @@ class _GuestFloorMenuScreenState extends State<GuestFloorMenuScreen> {
   Future<void> _load() async {
     setState(() => _error = null);
     try {
-      final menuRows = await supabase
-          .from('menu_items')
-          .select('name, dietary')
-          .eq('event_id', widget.eventId)
-          .order('name');
-      final sectionRows = await supabase
-          .from('sections')
-          .select('id, name, type, display_order, tables(seat_count)')
-          .eq('event_id', widget.eventId)
-          .order('display_order');
+      // Definer RPCs rather than direct table reads: `menu_items` and
+      // `sections` are scoped to the owning caterer and to guests holding a
+      // booking (0022), and a guest browsing the floor before they book has
+      // neither. Naming the event id from their QR is the access rule, the
+      // same way get_public_event_info works for the landing page.
+      final menuRows = await supabase.rpc(
+        'public_event_menu',
+        params: {'p_event_id': widget.eventId},
+      );
+      final sectionRows = await supabase.rpc(
+        'public_event_sections',
+        params: {'p_event_id': widget.eventId},
+      );
       setState(() {
         _menuItems = List<Map<String, dynamic>>.from(menuRows)
             .map((r) => _MenuItem(name: r['name'] as String, dietary: r['dietary'] as String))
             .toList();
         _sections = List<Map<String, dynamic>>.from(sectionRows).map((r) {
-          final capacity = (r['tables'] as List)
-              .fold<int>(0, (sum, t) => sum + (t['seat_count'] as int));
+          // Capacity is summed server-side now, so this no longer needs to
+          // read `tables` at all.
           return _Section(
             id: r['id'] as String,
             name: r['name'] as String,
             type: r['type'] as String,
-            capacity: capacity,
+            capacity: r['capacity'] as int,
           );
         }).toList();
       });

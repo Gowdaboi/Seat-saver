@@ -99,8 +99,21 @@ class _SeatManagementContent extends StatefulWidget {
   State<_SeatManagementContent> createState() => _SeatManagementContentState();
 }
 
+/// A sitting the host can put a walk-in into.
+class _RoundOption {
+  _RoundOption({required this.id, required this.number, required this.status});
+  final String id;
+  final int number;
+  final String status;
+
+  String get label => status == 'current' ? 'Round $number (running)' : 'Round $number';
+}
+
 class _SeatManagementContentState extends State<_SeatManagementContent> {
   List<_Seat>? _seats;
+
+  /// Rounds still open to bookings. Empty for buffet, which has none.
+  List<_RoundOption> _rounds = const [];
   String? _error;
   bool _mutating = false;
   bool _selectMode = false;
@@ -144,6 +157,17 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         );
       }
 
+      // Offered in the assign dialog so a host can deliberately seat someone
+      // in a later sitting. host_assign_seats otherwise always takes the
+      // earliest round with room, which makes "put this family in the second
+      // sitting" impossible to express.
+      final roundRows = await supabase
+          .from('rounds')
+          .select('id, round_number, status')
+          .eq('event_id', widget.eventId)
+          .inFilter('status', ['upcoming', 'current'])
+          .order('round_number');
+
       final bySeatId = <String, _Reservation>{};
       if (byBookingId.isNotEmpty) {
         final links = await supabase
@@ -157,6 +181,13 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
       }
 
       setState(() {
+        _rounds = List<Map<String, dynamic>>.from(roundRows)
+            .map((r) => _RoundOption(
+                  id: r['id'] as String,
+                  number: r['round_number'] as int,
+                  status: r['status'] as String,
+                ))
+            .toList();
         _seats = List<Map<String, dynamic>>.from(rows).map((r) {
           final t = r['tables'] as Map;
           final id = r['id'] as String;
@@ -224,6 +255,9 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
   Future<void> _showAssignDialog() async {
     final nameController = TextEditingController();
     final phoneController = TextEditingController();
+    // null = let the RPC choose the earliest round with room, which is the
+    // right default and what happened unconditionally before.
+    String? roundId;
     // No "seat them now" toggle: assigning a seat makes a booking, and
     // whether the guest is actually sitting down is what check-in decides.
     // Letting the host set both independently let the two drift apart.
@@ -249,6 +283,33 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
                   hintText: 'Leave blank if unknown',
                 ),
               ),
+              if (_rounds.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String?>(
+                  initialValue: roundId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: 'Sitting'),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('Next with room'),
+                    ),
+                    for (final round in _rounds)
+                      DropdownMenuItem<String?>(
+                        value: round.id,
+                        child: Text(round.label),
+                      ),
+                  ],
+                  onChanged: (v) => setDialogState(() => roundId = v),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Leave as "Next with room" unless this guest has to be in a '
+                  'particular sitting — a new round is opened automatically when '
+                  'the planned ones fill up.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
             ],
           ),
           actions: [
@@ -279,8 +340,10 @@ class _SeatManagementContentState extends State<_SeatManagementContent> {
         'p_party_size': seatCount,
         'p_guest_name': name,
         'p_guest_phone': phone.isEmpty ? null : phone,
-        // p_round_id omitted: the RPC picks the earliest round with room,
-        // creating the next sitting when the planned ones are full.
+        // Null lets the RPC pick the earliest round with room, opening the
+        // next sitting when the planned ones are full. A value here is the
+        // host overriding that deliberately.
+        'p_round_id': roundId,
       }) as String;
       setState(() {
         _selected.clear();

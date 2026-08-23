@@ -55,9 +55,13 @@ class _GuestSeatPickerScreenState extends State<GuestSeatPickerScreen> {
 
       int? roundNumber;
       if (roundId != null) {
-        final round =
-            await supabase.from('rounds').select('round_number').eq('id', roundId).single();
-        roundNumber = round['round_number'] as int;
+        // Via an RPC because `rounds` is scoped to the caterer and to guests
+        // who already hold a booking (0022) — and this guest is in the middle
+        // of making their first one.
+        roundNumber = await supabase.rpc(
+          'public_round_number',
+          params: {'p_round_id': roundId},
+        ) as int?;
       }
 
       // seats_for_round, not a select on `seats`: whether a seat is free is
