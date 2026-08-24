@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/app_url.dart';
 import '../../../core/supabase_client.dart';
 
 /// Sends a password-reset email. The redirect link lands back on this app
@@ -40,7 +41,9 @@ class _HostForgotPasswordScreenState extends State<HostForgotPasswordScreen> {
     try {
       await supabase.auth.resetPasswordForEmail(
         email,
-        redirectTo: '${Uri.base.origin}/#/host/reset-password',
+        // origin alone dropped the deployment's base path, so on GitHub Pages
+        // the recovery link pointed at the account root rather than the app.
+        redirectTo: appUrl('/host/reset-password'),
       );
       setState(() => _sent = true);
     } on AuthException catch (e) {

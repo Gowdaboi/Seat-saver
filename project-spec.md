@@ -468,3 +468,19 @@ tables are added/removed during floor design.
   `public_round_number` are security-definer functions taking one event id, so naming the event you
   were given is the access rule and cannot be used to browse. Section capacity is summed inside the
   RPC, which also removes the guest's last reason to read `tables` at all. See `0022_…`.
+- **Emailed links are derived from the running deployment, not from a fixed setting.** Reported as
+  issue #1: confirmation emails linked to `http://localhost:8765`, a machine no one but the
+  developer has. `signUp()` passed no `emailRedirectTo`, so Supabase fell back to the project's
+  single Site URL — one value, which cannot be right for both a local build and a hosted one. The
+  same class of bug sat unreported in password recovery, which used `Uri.base.origin`: scheme and
+  host only, dropping the `/Seat-saver/` base path so the link 404'd on GitHub Pages. Both now build
+  from the current page's origin *and* path, so each deployment mails links back to itself. Supabase
+  still validates these against its Redirect URLs allow-list, so a new deployment origin has to be
+  added there before its links work.
+- **A rejected auth link explains itself.** The reported symptom was a link that "goes nowhere": an
+  expired confirmation drops the person on the app root with the reason buried in query and
+  fragment parameters, and the landing page rendered as if nothing had happened. It now shows the
+  provider's own wording — "Email link is invalid or has expired" — with the next step underneath,
+  since the reason alone doesn't tell anyone what to do. The URL-parsing is a pure function taking a
+  `Uri` so it can be tested against the exact link from the report, including that a `/#/c/<token>`
+  cancel link is never mistaken for an error.

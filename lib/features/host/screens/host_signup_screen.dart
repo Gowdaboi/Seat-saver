@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/app_url.dart';
 import '../../../core/supabase_client.dart';
 
 /// Signs up a new caterer. business_name is passed as auth user metadata
@@ -48,6 +49,12 @@ class _HostSignUpScreenState extends State<HostSignUpScreen> {
         email: email,
         password: _passwordController.text,
         data: {'business_name': _businessNameController.text.trim()},
+        // Without this, Supabase falls back to the project's single Site URL
+        // — which was localhost, so every confirmation email sent to anyone
+        // but the developer linked to a machine they do not have (issue #1).
+        // Derived from the running page, so a build served from Pages mails
+        // Pages links and a local build mails local ones.
+        emailRedirectTo: appUrl('/host/login'),
       );
 
       // Supabase deliberately doesn't return a distinct "email taken" error
