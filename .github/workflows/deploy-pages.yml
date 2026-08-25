@@ -1,0 +1,90 @@
+name: Deploy to GitHub Pages
+
+# Until now the hosted build was compiled locally and force-pushed to a
+# gh-pages branch by hand. That meant `git push` to main changed nothing
+# users could see, and the two could drift apart silently — the source could
+# be three commits ahead of what anyone visiting the site was running.
+on:
+  push:
+    branches: [main]
+  # So a deploy can be re-run without an empty commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race. In-progress runs are allowed to finish rather
+# than being cancelled, so a half-uploaded artifact is never published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          # Pinned to the version this is developed against, so a Flutter
+          # release cannot break the deploy on an unrelated day.
+          flutter-version: 3.44.9
+          channel: stable
+          cache: true
+
+      - name: Write .env
+        # .env is declared as an asset in pubspec.yaml and is gitignored, so
+        # without this the build fails outright on a missing asset. The anon
+        # key is published in the compiled bundle either way — it is the
+        # publishable key and RLS is what actually protects the data — but
+        # keeping it in Actions secrets means it is rotatable in one place
+        # rather than committed.
+        run: |
+          printf 'SUPABASE_URL=%s\n' "${{ secrets.SUPABASE_URL }}" > .env
+          printf 'SUPABASE_ANON_KEY=%s\n' "${{ secrets.SUPABASE_ANON_KEY }}" >> .env
+
+      - name: Fail early if secrets are missing
+        # An empty value here produces a build that compiles and then dies at
+        # runtime with an unhelpful error, which is far worse to debug than a
+        # red workflow.
+        run: |
+          if ! grep -q 'SUPABASE_URL=https' .env; then
+            echo "::error::SUPABASE_URL repository secret is missing or malformed"
+            exit 1
+          fi
+          if [ "$(grep -c 'SUPABASE_ANON_KEY=.\+' .env)" -ne 1 ]; then
+            echo "::error::SUPABASE_ANON_KEY repository secret is missing"
+            exit 1
+          fi
+
+      - run: flutter pub get
+
+      # Gate the deploy on the checks, so main can never publish a build that
+      # would not pass locally.
+      - run: flutter analyze
+      - run: flutter test
+
+      - name: Build web
+        # base-href comes from the repository name because GitHub Pages serves
+        # a project site from /<repo>/. Hardcoding it meant a rename would
+        # produce a build that loads nothing but a blank page.
+        run: flutter build web --base-href "/${{ github.event.repository.name }}/"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
