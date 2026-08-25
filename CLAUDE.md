@@ -256,6 +256,26 @@ available` — **expected**, managed Supabase has it. Everything after still app
   (floor seating zones), and `menu_items.dietary` is the veg/nonveg tag — it was
   called `type` until `0012`, which read ambiguously once courses existed.
 
+## Deployment
+
+The hosted app is GitHub Pages at `https://gowdaboi.github.io/Seat-saver/`,
+built by `.github/workflows/deploy-pages.yml` on every push to `main`. Don't
+build and force-push a `gh-pages` branch by hand any more — that was the old
+way, and it meant source and site could drift apart silently.
+
+- `.env` is a **declared asset** in `pubspec.yaml` *and* gitignored, so CI
+  writes it from the `SUPABASE_URL` / `SUPABASE_ANON_KEY` repo secrets. Miss
+  that and the build fails on a missing asset.
+- `--base-href` must be `/<repo>/` for a Pages project site; the workflow
+  derives it from the repo name so a rename can't produce a blank page.
+- The anon key ships inside the compiled bundle regardless — it is the
+  publishable key and RLS is the actual protection.
+- **Emailed auth links are validated against Supabase's Redirect URLs
+  allow-list.** A new deployment origin needs adding there or Supabase
+  silently ignores `emailRedirectTo` and falls back to Site URL — which is
+  how confirmation emails ended up pointing at localhost (issue #1). Entries
+  need a `**` suffix to cover the `#/host/login` fragment.
+
 ## Repo
 
 `github.com/Gowdaboi/Seat-saver`, public (framed for portfolio/interview
