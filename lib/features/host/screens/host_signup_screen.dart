@@ -4,6 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/app_url.dart';
 import '../../../core/supabase_client.dart';
+import '../widgets/resend_confirmation.dart';
 
 /// Signs up a new caterer. business_name is passed as auth user metadata
 /// (not written to `caterers` directly here) because with "Confirm email"
@@ -105,10 +106,15 @@ class _HostSignUpScreenState extends State<HostSignUpScreen> {
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 20),
-                      OutlinedButton(
+                      FilledButton(
                         onPressed: () => context.go('/host/login'),
                         child: const Text('Go to log in'),
                       ),
+                      const SizedBox(height: 16),
+                      // Right here, while the address is still on screen and
+                      // known to be correct — the point at which someone
+                      // realises nothing has arrived.
+                      ResendConfirmationButton(email: _emailController.text.trim()),
                     ],
                   )
                 : _alreadyRegistered

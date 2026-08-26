@@ -1,5 +1,21 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+/// Whether a failed sign-in was rejected only because the address has never
+/// been confirmed.
+///
+/// Worth singling out because it is the one sign-in failure the person can fix
+/// from that screen, and the one where the generic wording actively misleads:
+/// the email and password are both correct.
+///
+/// Matched on the error code, with the message as a fallback — older Supabase
+/// releases send no code for this, and a version bump should not silently take
+/// the resend button away.
+bool isEmailNotConfirmed(Object error) {
+  if (error is! AuthException) return false;
+  if (error.code == 'email_not_confirmed') return true;
+  return error.message.toLowerCase().contains('not confirmed');
+}
+
 /// Turns whatever came back from Supabase into something a caterer can act on.
 ///
 /// Raw `PostgrestException.toString()` used to reach snackbars verbatim —

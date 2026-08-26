@@ -8,6 +8,8 @@ import 'package:catering_app/core/errors.dart';
 // tells a caterer what to do, and it leaks schema shape to anyone watching
 // the screen over their shoulder.
 void main() {
+  _unconfirmedTests();
+
   test('a repeat booking for the same guest reads as plain English', () {
     final error = PostgrestException(
       message: 'duplicate key value violates unique constraint '
@@ -70,5 +72,42 @@ void main() {
       friendlyError(PostgrestException(message: '   ', code: '42P01'), fallback: 'Could not save.'),
       'Could not save.',
     );
+  });
+}
+
+// The resend affordance only appears when this returns true, so a Supabase
+// release that changes the code or the wording would quietly remove the one
+// recovery path for an unconfirmed account.
+void _unconfirmedTests() {
+  group('isEmailNotConfirmed', () {
+    test('matches the documented error code', () {
+      expect(
+        isEmailNotConfirmed(
+          AuthException('Email not confirmed', statusCode: '400', code: 'email_not_confirmed'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('falls back to the message when no code is sent', () {
+      expect(isEmailNotConfirmed(AuthException('Email not confirmed')), isTrue);
+    });
+
+    test('is case-insensitive about the message', () {
+      expect(isEmailNotConfirmed(AuthException('EMAIL NOT CONFIRMED')), isTrue);
+    });
+
+    test('does not fire on a wrong password', () {
+      expect(
+        isEmailNotConfirmed(
+          AuthException('Invalid login credentials', code: 'invalid_credentials'),
+        ),
+        isFalse,
+      );
+    });
+
+    test('does not fire on a non-auth error', () {
+      expect(isEmailNotConfirmed(StateError('socket closed')), isFalse);
+    });
   });
 }

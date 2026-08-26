@@ -484,3 +484,19 @@ tables are added/removed during floor design.
   since the reason alone doesn't tell anyone what to do. The URL-parsing is a pure function taking a
   `Uri` so it can be tested against the exact link from the report, including that a `/#/c/<token>`
   cancel link is never mistaken for an error.
+- **The reminder channel picker was there, but nobody could find it.** SMS vs WhatsApp, lead time
+  and template id have been editable since the Reminder settings dialog was added — behind an
+  unlabelled bell icon on the Rounds card, which was reported as a missing feature by someone
+  looking straight at it. Now a labelled "Reminders" button. Worth remembering as a general point:
+  an icon-only control in a busy card is, in practice, an absent one.
+- **A confirmation email can be resent.** Confirmation links are single-use and expire, and the
+  first one may simply never arrive — spam, a mistyped address, or a mail scanner that follows
+  links before the person sees them. The only recovery was signing up again with the same address,
+  which the app answers with "an account with this email already exists": a dead end. The resend
+  appears in the two places the problem is actually noticed — on the "check your email" panel right
+  after signing up, while the address is still on screen and known to be right, and on the login
+  screen when sign-in is refused specifically for an unconfirmed address. That refusal is now told
+  apart from a wrong password, because the generic wording actively misleads there: the credentials
+  are correct. A sixty-second cooldown follows a successful send, since Supabase's built-in mailer
+  allows only a couple of emails an hour and rejects rather than queues the rest — without it,
+  someone clicking twice burns the allowance on sends that were never going to happen.

@@ -510,9 +510,11 @@ class _RoundsContentState extends State<_RoundsContent> {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.notifications_outlined),
-                  tooltip: 'Reminder settings',
+                // Labelled, not a bare icon: as an unlabelled bell this was
+                // reported missing by someone looking straight at it.
+                TextButton.icon(
+                  icon: const Icon(Icons.notifications_outlined, size: 18),
+                  label: const Text('Reminders'),
                   onPressed: _mutating ? null : _showReminderSettings,
                 ),
               ],

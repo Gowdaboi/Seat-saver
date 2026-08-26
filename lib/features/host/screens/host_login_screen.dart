@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/errors.dart';
 import '../../../core/supabase_client.dart';
+import '../widgets/resend_confirmation.dart';
 
 class HostLoginScreen extends StatefulWidget {
   const HostLoginScreen({super.key});
@@ -18,6 +20,12 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
   bool _submitting = false;
   String? _error;
 
+  /// Set when the sign-in failed specifically because the address was never
+  /// confirmed. That is the one failure a person can fix from this screen,
+  /// and the one where "wrong email or password" would be actively
+  /// misleading — the credentials are fine.
+  bool _needsConfirmation = false;
+
   @override
   void dispose() {
     _emailController.dispose();
@@ -30,6 +38,7 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
     setState(() {
       _submitting = true;
       _error = null;
+      _needsConfirmation = false;
     });
     try {
       await supabase.auth.signInWithPassword(
@@ -42,7 +51,14 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
       await ensureCatererProfile();
       if (mounted) context.go('/host/dashboard');
     } on AuthException catch (e) {
-      setState(() => _error = e.message);
+      final unconfirmed = isEmailNotConfirmed(e);
+      setState(() {
+        _needsConfirmation = unconfirmed;
+        _error = unconfirmed
+            ? 'This email has not been confirmed yet. Use the link in your '
+                'confirmation email, or send yourself a new one.'
+            : e.message;
+      });
     } catch (e) {
       setState(() => _error = 'Could not reach Supabase: $e');
     } finally {
@@ -83,6 +99,10 @@ class _HostLoginScreenState extends State<HostLoginScreen> {
                   const SizedBox(height: 20),
                   if (_error != null) ...[
                     Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    if (_needsConfirmation) ...[
+                      const SizedBox(height: 12),
+                      ResendConfirmationButton(email: _emailController.text.trim()),
+                    ],
                     const SizedBox(height: 12),
                   ],
                   FilledButton(
