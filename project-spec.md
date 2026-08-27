@@ -500,3 +500,15 @@ tables are added/removed during floor design.
   are correct. A sixty-second cooldown follows a successful send, since Supabase's built-in mailer
   allows only a couple of emails an hour and rejects rather than queues the rest — without it,
   someone clicking twice burns the allowance on sends that were never going to happen.
+- **The host login form is discoverable by password managers.** Requested as HTML attributes —
+  `type`, `name`, `autocomplete`, a `<form>` with `onSubmit` — which this app has no direct way to
+  set, because Flutter draws to a canvas and there is no hand-written markup. The equivalent is
+  `AutofillGroup` plus `autofillHints` on each field: Flutter then emits a real `<form>` containing
+  a hidden input per field, carrying the `autocomplete` attribute a manager looks for. Verified in
+  the browser rather than assumed — the DOM now holds `autocomplete="username"` and
+  `autocomplete="current-password"` inside one form with a submit input. The email field renders as
+  `type="text"` rather than `type="email"`, which is how Flutter maps a username field; the email
+  keyboard and validation that `type="email"` would have provided come from `keyboardType` and the
+  validator instead. `TextInput.finishAutofillContext()` fires on a successful sign-in, which is
+  what makes a manager *offer to save* rather than merely fill — without it the credentials are
+  fillable but never savable. Enter now submits too, via `onFieldSubmitted`.
