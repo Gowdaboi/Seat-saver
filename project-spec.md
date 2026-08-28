@@ -537,3 +537,17 @@ tables are added/removed during floor design.
 - **The Inactive tab ignores the date filter the Past tab applies.** Archiving is allowed on any
   event, so if that view listed only archived *past* events, archiving an upcoming one would strand
   it — gone from every picker, and absent from the only screen that could bring it back.
+- **Archiving blocks new commitments; it never blocks completions or releases.** 0023 hid archived
+  events from the host's pickers but left every guest path open — an old QR still reached the
+  landing page, the floor and the seat picker, and still produced a booking. Now booking is refused,
+  while cancelling a booking, checking in at the door, and the no-show/reassignment machinery keep
+  working: someone who already holds a seat must never be trapped by an administrative action taken
+  after they booked, and a cancellation frees a seat, which stays worth allowing for as long as the
+  booking exists. Enforced by an INSERT-only trigger on `bookings` rather than a condition inside
+  `book_seats` and `host_assign_seats` — two long functions that would both need editing, and any
+  third booking path added later would silently miss the rule. INSERT-only is what makes the trigger
+  express exactly "no new commitments". See `0024_…`.
+- **A finished event says so, rather than looking like a broken QR code.** Returning no rows from
+  `get_public_event_info` would leave the landing page on "This QR code doesn't match a known
+  event", which reads as a faulty code and sends guests to find staff about something working
+  perfectly. It returns `is_archived` instead, and the page says the event has ended.

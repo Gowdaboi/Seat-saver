@@ -66,19 +66,35 @@ class _GuestEventEntryScreenState extends State<GuestEventEntryScreen> {
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 16),
-                        const Text(
-                          'Verify your phone number to view the menu, floor layout, '
-                          'and book a seat for the next round.',
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 24),
-                        FilledButton(
-                          onPressed: () => context.push('/e/${widget.eventId}/otp'),
-                          child: const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-                            child: Text('Continue'),
+                        // An archived event is a real event that has finished,
+                        // not a bad QR code — saying so stops someone going to
+                        // find staff about a code that is working perfectly.
+                        if (_event!['is_archived'] == true) ...[
+                          Text(
+                            'This event has ended and is no longer taking bookings.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Theme.of(context).colorScheme.error),
                           ),
-                        ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'If you think this is wrong, please speak to the host.',
+                            textAlign: TextAlign.center,
+                          ),
+                        ] else ...[
+                          const Text(
+                            'Verify your phone number to view the menu, floor layout, '
+                            'and book a seat for the next round.',
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 24),
+                          FilledButton(
+                            onPressed: () => context.push('/e/${widget.eventId}/otp'),
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+                              child: Text('Continue'),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
         ),
