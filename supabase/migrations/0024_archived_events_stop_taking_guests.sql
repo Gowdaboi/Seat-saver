@@ -23,7 +23,7 @@
 -- miss the rule. INSERT-only is what makes this express "no new commitments"
 -- exactly: updating a booking to 'cancelled' or 'no_show' is untouched.
 
-create function prevent_booking_archived_event() returns trigger
+create or replace function prevent_booking_archived_event() returns trigger
 language plpgsql as $$
 begin
   if exists (
@@ -36,6 +36,7 @@ begin
 end;
 $$;
 
+drop trigger if exists bookings_prevent_archived_event on bookings;
 create trigger bookings_prevent_archived_event
   before insert on bookings
   for each row execute function prevent_booking_archived_event();

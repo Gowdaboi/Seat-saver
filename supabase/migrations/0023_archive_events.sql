@@ -16,7 +16,10 @@
 -- which is the question actually asked when something turns up in the
 -- archive unexpectedly. Null means active.
 
-alter table events add column archived_at timestamptz;
+-- Idempotent throughout: the Supabase SQL editor is not all-or-nothing —
+-- a parse error partway leaves earlier statements committed — so applying
+-- this twice, or after a half-finished attempt, has to be safe.
+alter table events add column if not exists archived_at timestamptz;
 
 comment on column events.archived_at is
   'When the host retired this event from the pickers. Null means active. '
@@ -24,7 +27,7 @@ comment on column events.archived_at is
 
 -- Partial, because the only hot query is "this caterer''s active events",
 -- which is what every event picker in the app runs on load.
-create index events_active_idx on events (caterer_id, date)
+create index if not exists events_active_idx on events (caterer_id, date)
   where archived_at is null;
 
 -- ── don't archive an event that is being served ──────────────────────────
@@ -34,7 +37,7 @@ create index events_active_idx on events (caterer_id, date)
 -- disables the action in that state, but the rule belongs here — a client
 -- check is a courtesy, not a guarantee.
 
-create function prevent_archiving_live_event() returns trigger
+create or replace function prevent_archiving_live_event() returns trigger
 language plpgsql as $$
 begin
   if new.archived_at is not null
@@ -49,6 +52,7 @@ begin
 end;
 $$;
 
+drop trigger if exists events_prevent_archiving_live on events;
 create trigger events_prevent_archiving_live
   before update of archived_at on events
   for each row execute function prevent_archiving_live_event();
