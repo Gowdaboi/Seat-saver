@@ -512,3 +512,11 @@ tables are added/removed during floor design.
   validator instead. `TextInput.finishAutofillContext()` fires on a successful sign-in, which is
   what makes a manager *offer to save* rather than merely fill — without it the credentials are
   fillable but never savable. Enter now submits too, via `onFieldSubmitted`.
+- **Signup declares `newPassword`, not `password`.** The same autofill treatment as the login form,
+  with one deliberate difference: the signup field is marked `AutofillHints.newPassword`, which is
+  what makes a manager offer to *generate* a password. Marking it `password` would instead invite it
+  to fill an existing credential into a field creating a new account. Business name is
+  `organizationName`, so the DOM form carries `organization`, `username` and `new-password`.
+  `finishAutofillContext()` fires only after an account was actually created — deliberately after
+  the already-registered check, since that path creates nothing and prompting to save there would
+  offer to overwrite a working entry with a password that does not open it.

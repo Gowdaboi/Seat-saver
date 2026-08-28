@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -68,6 +69,13 @@ class _HostSignUpScreenState extends State<HostSignUpScreen> {
         return;
       }
 
+      // An account now exists, whichever branch follows — so this is the
+      // moment a manager should offer to save the new credentials. It sits
+      // after the already-registered check above deliberately: that path
+      // creates nothing, and prompting to save there would offer to
+      // overwrite a working entry with a password that does not open it.
+      TextInput.finishAutofillContext();
+
       if (res.session != null) {
         // confirm-email is off (or already confirmed) — a real session
         // exists right away, so the profile can be created now.
@@ -118,80 +126,107 @@ class _HostSignUpScreenState extends State<HostSignUpScreen> {
                     ],
                   )
                 : _alreadyRegistered
-                    ? Column(
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.person_outline, size: 48),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'An account with this email already exists.',
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 20),
+                      FilledButton(
+                        onPressed: () => context.go('/host/login'),
+                        child: const Text('Log in instead'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: () => setState(() => _alreadyRegistered = false),
+                        child: const Text('Use a different email'),
+                      ),
+                    ],
+                  )
+                : Form(
+                    key: _formKey,
+                    // Same mechanism as the login screen: Flutter emits a
+                    // real <form> of hidden inputs carrying autocomplete
+                    // attributes for every field in the group, which is
+                    // what a password manager reads.
+                    child: AutofillGroup(
+                      child: Column(
                         mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          const Icon(Icons.person_outline, size: 48),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'An account with this email already exists.',
-                            textAlign: TextAlign.center,
+                          TextFormField(
+                            controller: _businessNameController,
+                            autofillHints: const [AutofillHints.organizationName],
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(labelText: 'Business name'),
+                            validator: (v) => (v == null || v.trim().isEmpty) ? 'Required' : null,
+                          ),
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            controller: _emailController,
+                            keyboardType: TextInputType.emailAddress,
+                            autofillHints: const [AutofillHints.username, AutofillHints.email],
+                            textInputAction: TextInputAction.next,
+                            decoration: const InputDecoration(labelText: 'Email'),
+                            validator: (v) =>
+                                (v == null || !v.contains('@')) ? 'Enter a valid email' : null,
+                          ),
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            controller: _passwordController,
+                            obscureText: true,
+                            // newPassword, not password: this is where a
+                            // manager offers to *generate* one, and where
+                            // most saved entries are actually created.
+                            // Marking it `password` would instead invite it
+                            // to fill an existing credential into a field
+                            // that is creating a new account.
+                            autofillHints: const [AutofillHints.newPassword],
+                            textInputAction: TextInputAction.done,
+                            onFieldSubmitted: (_) {
+                              if (!_submitting) _submit();
+                            },
+                            decoration: const InputDecoration(
+                              labelText: 'Password',
+                              helperText: 'At least 8 characters, with letters and numbers',
+                              helperMaxLines: 2,
+                            ),
+                            validator: (v) {
+                              if (v == null || v.length < 8) return 'At least 8 characters';
+                              final hasLetter = v.contains(RegExp(r'[A-Za-z]'));
+                              final hasDigit = v.contains(RegExp(r'[0-9]'));
+                              if (!hasLetter || !hasDigit) {
+                                return 'Include both letters and numbers';
+                              }
+                              return null;
+                            },
                           ),
                           const SizedBox(height: 20),
+                          if (_error != null) ...[
+                            Text(
+                              _error!,
+                              style: TextStyle(color: Theme.of(context).colorScheme.error),
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           FilledButton(
-                            onPressed: () => context.go('/host/login'),
-                            child: const Text('Log in instead'),
-                          ),
-                          const SizedBox(height: 8),
-                          TextButton(
-                            onPressed: () => setState(() => _alreadyRegistered = false),
-                            child: const Text('Use a different email'),
+                            onPressed: _submitting ? null : _submit,
+                            child: _submitting
+                                ? const SizedBox(
+                                    height: 18,
+                                    width: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : const Text('Sign up'),
                           ),
                         ],
-                      )
-                    : Form(
-                        key: _formKey,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            TextFormField(
-                              controller: _businessNameController,
-                              decoration: const InputDecoration(labelText: 'Business name'),
-                              validator: (v) =>
-                                  (v == null || v.trim().isEmpty) ? 'Required' : null,
-                            ),
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: _emailController,
-                              keyboardType: TextInputType.emailAddress,
-                              decoration: const InputDecoration(labelText: 'Email'),
-                              validator: (v) =>
-                                  (v == null || !v.contains('@')) ? 'Enter a valid email' : null,
-                            ),
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: _passwordController,
-                              obscureText: true,
-                              decoration: const InputDecoration(
-                                labelText: 'Password',
-                                helperText: 'At least 8 characters, with letters and numbers',
-                                helperMaxLines: 2,
-                              ),
-                              validator: (v) {
-                                if (v == null || v.length < 8) return 'At least 8 characters';
-                                final hasLetter = v.contains(RegExp(r'[A-Za-z]'));
-                                final hasDigit = v.contains(RegExp(r'[0-9]'));
-                                if (!hasLetter || !hasDigit) return 'Include both letters and numbers';
-                                return null;
-                              },
-                            ),
-                            const SizedBox(height: 20),
-                            if (_error != null) ...[
-                              Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-                              const SizedBox(height: 12),
-                            ],
-                            FilledButton(
-                              onPressed: _submitting ? null : _submit,
-                              child: _submitting
-                                  ? const SizedBox(
-                                      height: 18, width: 18,
-                                      child: CircularProgressIndicator(strokeWidth: 2))
-                                  : const Text('Sign up'),
-                            ),
-                          ],
-                        ),
                       ),
+                    ),
+                  ),
           ),
         ),
       ),
