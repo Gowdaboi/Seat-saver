@@ -66,6 +66,11 @@ class _EventPickerState extends State<EventPicker> {
           .from('events')
           .select('id, name, venue_name, date')
           .eq('caterer_id', caterer['id'])
+          // Archived events stay in the database in full — they are simply
+          // not offered for work any more (0023). This is the single query
+          // behind every event dropdown in the host app, so filtering here
+          // covers Design floor, Menu, Rounds and Manage seats at once.
+          .isFilter('archived_at', null)
           .order('date');
       final list = List<Map<String, dynamic>>.from(events);
       final selected = list.isNotEmpty ? list.first['id'] as String : null;

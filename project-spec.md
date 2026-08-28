@@ -520,3 +520,20 @@ tables are added/removed during floor design.
   `finishAutofillContext()` fires only after an account was actually created — deliberately after
   the already-registered check, since that path creates nothing and prompting to save there would
   offer to overwrite a working entry with a password that does not open it.
+- **Events can be archived, never deleted.** A caterer running two functions a week accumulates a
+  hundred a year, and every one stayed in the picker at the top of Design floor, Menu, Rounds and
+  Manage seats — ordered by date, so last winter's wedding sits between this week's two, and picking
+  wrong means working on the wrong night. "Mark as inactive" removes an event from every picker
+  while preserving it completely: the floor, menu, bookings and past-event recap are all still
+  there, and restoring is one tap. Deletion was never an option — an event is the root of a cascade
+  that would take its sections, tables, seats and booking history with it. Stored as
+  `events.archived_at` rather than a boolean, because "when did this get archived" is the question
+  actually asked when something turns up in the archive unexpectedly. See `0023_…`.
+- **An event being served cannot be archived.** Archiving removes it from every dropdown — including
+  the one the host reaches the Rounds screen through — so doing it mid-service strands them. A
+  database trigger refuses while any round is `current`; the menu item is disabled and says why, but
+  the rule lives in the database because a client check is a courtesy, not a guarantee.
+  Un-archiving is never blocked, since the recovery path must always be open.
+- **The Inactive tab ignores the date filter the Past tab applies.** Archiving is allowed on any
+  event, so if that view listed only archived *past* events, archiving an upcoming one would strand
+  it — gone from every picker, and absent from the only screen that could bring it back.

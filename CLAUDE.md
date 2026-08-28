@@ -181,8 +181,9 @@ still exists with a few subdirectories, so `pg_ctl start` fails with "is not
 a database cluster directory" rather than anything obvious. `rm -rf` the
 pgdata dir and `initdb` again; everything is rebuilt from migrations anyway.
 
-A `0000_supabase_stub.sql` in the session scratchpad stubs what the Supabase
-platform normally provides: the `auth` schema, `auth.users`, `auth.uid()` (reads
+`supabase/local_test_stub.sql` (in the repo — it was lost to /tmp cleanup
+three times before being committed) stubs what the Supabase platform normally
+provides: the `auth` schema, `auth.users`, `auth.uid()` (reads
 a session var so you can simulate logins), the `anon`/`authenticated` roles, and
 their default `public` grants. App migrations never declare those grants because
 real Supabase already has them.
